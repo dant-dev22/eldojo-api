@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Entornos virtuales
+.venv/
+venv/
+env/
+
+# Variables de entorno
+.env
+
+# Cachés
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# IDE / sistema
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

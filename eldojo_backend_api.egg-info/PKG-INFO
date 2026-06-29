@@ -1,0 +1,459 @@
+Metadata-Version: 2.4
+Name: eldojo-backend-api
+Version: 0.1.0
+Summary: Backend inicial en FastAPI para la plataforma ElDojo.
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+Requires-Dist: fastapi<1.0,>=0.115
+Requires-Dist: uvicorn[standard]<1.0,>=0.30
+Requires-Dist: SQLAlchemy<3.0,>=2.0
+Requires-Dist: PyMySQL<2.0,>=1.1
+Requires-Dist: python-dotenv<2.0,>=1.0
+
+# eldojo-backend-api
+
+Backend inicial en FastAPI para conectarse a la base de datos de `eldojo`.
+
+## Qué incluye
+
+- FastAPI base
+- Configuración por `.env`
+- Conexión a MySQL con SQLAlchemy 2.x y PyMySQL
+- Endpoint de salud de la API
+- Endpoint de salud de la base de datos
+- CRUD inicial de organizaciones
+- CRUD inicial de usuarios
+- CRUD inicial de sucursales
+- CRUD inicial de clases
+- CRUD inicial de horarios de clase
+- CRUD inicial de inscripciones a clase
+- CRUD inicial de asistencia
+- CRUD inicial de alumnos
+
+## Estructura
+
+```text
+app/
+  api/
+    routes/
+  core/
+  db/
+  main.py
+```
+
+## Requisitos
+
+- Python 3.11+
+- MySQL 8 corriendo
+- Base de datos `eldojo_db` ya creada y migrada desde el proyecto de DB
+
+## Instalación local
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install --upgrade pip
+pip install -e .
+```
+
+En Windows PowerShell:
+
+```powershell
+python -m venv .venv
+.venv\Scripts\Activate.ps1
+pip install --upgrade pip
+pip install -e .
+```
+
+## Variables de entorno
+
+Copia el ejemplo:
+
+```bash
+cp .env.example .env
+```
+
+Contenido esperado:
+
+```env
+APP_NAME=ElDojo Backend API
+APP_ENV=development
+APP_DEBUG=true
+API_V1_PREFIX=/api/v1
+DATABASE_URL=mysql+pymysql://eldojo_app:N7_xK9mP2_vQ@127.0.0.1:3306/eldojo_db
+```
+
+## Ejecutar la API
+
+```bash
+uvicorn app.main:app --reload
+```
+
+Si quieres fijar host y puerto:
+
+```bash
+uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+```
+
+## Endpoints disponibles
+
+- `GET /`
+- `GET /docs`
+- `GET /redoc`
+- `GET /api/v1/health`
+- `GET /api/v1/health/db`
+- `POST /api/v1/organizations`
+- `GET /api/v1/organizations`
+- `GET /api/v1/organizations/{organization_id}`
+- `PATCH /api/v1/organizations/{organization_id}`
+- `DELETE /api/v1/organizations/{organization_id}`
+- `POST /api/v1/users`
+- `GET /api/v1/users`
+- `GET /api/v1/users/{user_id}`
+- `PATCH /api/v1/users/{user_id}`
+- `DELETE /api/v1/users/{user_id}`
+- `POST /api/v1/branches`
+- `GET /api/v1/branches`
+- `GET /api/v1/branches/{branch_id}`
+- `PATCH /api/v1/branches/{branch_id}`
+- `POST /api/v1/classes`
+- `GET /api/v1/classes`
+- `GET /api/v1/classes/{class_id}`
+- `PATCH /api/v1/classes/{class_id}`
+- `DELETE /api/v1/classes/{class_id}`
+- `POST /api/v1/class-schedules`
+- `GET /api/v1/class-schedules`
+- `GET /api/v1/class-schedules/{schedule_id}`
+- `PATCH /api/v1/class-schedules/{schedule_id}`
+- `DELETE /api/v1/class-schedules/{schedule_id}`
+- `POST /api/v1/class-enrollments`
+- `GET /api/v1/class-enrollments`
+- `GET /api/v1/class-enrollments/{enrollment_id}`
+- `PATCH /api/v1/class-enrollments/{enrollment_id}`
+- `DELETE /api/v1/class-enrollments/{enrollment_id}`
+- `POST /api/v1/attendance`
+- `GET /api/v1/attendance`
+- `GET /api/v1/attendance/{attendance_id}`
+- `PATCH /api/v1/attendance/{attendance_id}`
+- `DELETE /api/v1/attendance/{attendance_id}`
+- `POST /api/v1/students`
+- `GET /api/v1/students`
+- `GET /api/v1/students/{student_id}`
+- `PATCH /api/v1/students/{student_id}`
+- `DELETE /api/v1/students/{student_id}`
+- `DELETE /api/v1/branches/{branch_id}`
+
+## Cómo probar la conexión a la DB
+
+1. Asegúrate de que la base del proyecto `eldojo` ya existe
+2. Verifica que `DATABASE_URL` tenga el usuario y password reales
+3. Arranca FastAPI
+4. Abre:
+
+```text
+http://127.0.0.1:8000/docs
+```
+
+5. Prueba el endpoint:
+
+```text
+GET /api/v1/health/db
+```
+
+Respuesta esperada:
+
+```json
+{
+  "status": "ok",
+  "database": "connected",
+  "organizations": 1
+}
+```
+
+## Cómo probar creación de datos desde Swagger
+
+La base semilla deja una organización inicial, normalmente con `id = 1`. Puedes
+confirmarlo con `GET /api/v1/health/db` o consultando directo en MySQL.
+
+### Crear organización
+
+Úsalo si quieres crear un tenant nuevo aparte del seed:
+
+```json
+{
+  "name": "Dojo Norte",
+  "slug": "DNT",
+  "is_active": true
+}
+```
+
+### Editar organización
+
+Ejemplo de `PATCH /api/v1/organizations/1`:
+
+```json
+{
+  "name": "El Dojo HQ",
+  "is_active": true
+}
+```
+
+### Crear sucursal
+
+Prueba primero:
+
+```json
+{
+  "organization_id": 1,
+  "name": "Sucursal Norte",
+  "country": "Mexico",
+  "state": "Nuevo Leon",
+  "city": "Monterrey",
+  "address": "Av. Principal 123",
+  "timezone": "America/Monterrey",
+  "qr_secret": "sucursal-norte-qr-2026",
+  "is_active": true
+}
+```
+
+### Crear usuario admin de sucursal
+
+```json
+{
+  "email": "admin.sucursal@eldojo.com",
+  "password": "Admin123!",
+  "role": "branch_admin",
+  "organization_id": 1,
+  "branch_id": 1,
+  "is_active": true
+}
+```
+
+### Crear usuario estudiante
+
+```json
+{
+  "email": "alumno1@eldojo.com",
+  "password": "Alumno123!",
+  "role": "student",
+  "is_active": true
+}
+```
+
+### Crear alumno
+
+El `unique_code` se genera automáticamente a partir del `slug` de la organización,
+así que no tienes que enviarlo en el request.
+
+```json
+{
+  "organization_id": 1,
+  "branch_id": 1,
+  "user_id": 3,
+  "first_name": "Juan",
+  "last_name": "Perez",
+  "birth_date": "2008-05-10",
+  "birth_place": "Monterrey",
+  "height_cm": 168,
+  "enrollment_date": "2026-06-20",
+  "monthly_fee": 1200.00,
+  "currency": "MXN",
+  "next_payment_date": "2026-07-20",
+  "payment_status": "up_to_date",
+  "status": "active",
+  "guardian_name": "Maria Perez",
+  "guardian_phone": "8112345678",
+  "notes": "Alumno nuevo de prueba"
+}
+```
+
+### Crear clase
+
+El seed crea la disciplina `BJJ`, así que normalmente podrás usar `discipline_id = 1`
+si todavía no has insertado más disciplinas.
+
+```json
+{
+  "organization_id": 1,
+  "branch_id": 1,
+  "discipline_id": 1,
+  "name": "BJJ Adultos Noche",
+  "description": "Clase tecnica y sparring",
+  "instructor_name": "Profesor Dante",
+  "capacity": 24,
+  "is_active": true
+}
+```
+
+### Editar clase
+
+Ejemplo de `PATCH /api/v1/classes/1`:
+
+```json
+{
+  "capacity": 30,
+  "instructor_name": "Profesor Dante Ram"
+}
+```
+
+### Crear horario de clase
+
+`day_of_week` usa este convenio:
+
+- `0 = lunes`
+- `1 = martes`
+- `2 = miercoles`
+- `3 = jueves`
+- `4 = viernes`
+- `5 = sabado`
+- `6 = domingo`
+
+Ejemplo:
+
+```json
+{
+  "class_id": 1,
+  "day_of_week": 0,
+  "start_time": "19:00:00",
+  "end_time": "20:30:00"
+}
+```
+
+### Editar horario de clase
+
+Ejemplo de `PATCH /api/v1/class-schedules/1`:
+
+```json
+{
+  "day_of_week": 2,
+  "start_time": "19:30:00",
+  "end_time": "21:00:00"
+}
+```
+
+### Crear inscripcion de clase
+
+Ejemplo:
+
+```json
+{
+  "student_id": 1,
+  "class_id": 1,
+  "enrolled_at": "2026-06-20T19:00:00",
+  "is_active": true
+}
+```
+
+### Editar inscripcion de clase
+
+Ejemplo de `PATCH /api/v1/class-enrollments/1`:
+
+```json
+{
+  "is_active": false
+}
+```
+
+### Crear asistencia
+
+Ejemplo de check-in manual:
+
+```json
+{
+  "student_id": 1,
+  "class_id": 1,
+  "branch_id": 1,
+  "check_in_at": "2026-06-20T19:05:00",
+  "method": "manual",
+  "registered_by": 1
+}
+```
+
+Ejemplo de check-in por QR:
+
+```json
+{
+  "student_id": 1,
+  "class_id": 1,
+  "branch_id": 1,
+  "check_in_at": "2026-06-20T19:06:00",
+  "method": "qr",
+  "registered_by": null
+}
+```
+
+### Editar asistencia
+
+Ejemplo de `PATCH /api/v1/attendance/1`:
+
+```json
+{
+  "check_in_at": "2026-06-20T19:10:00",
+  "method": "manual",
+  "registered_by": 1
+}
+```
+
+### Editar alumno
+
+Ejemplo de `PATCH /api/v1/students/1`:
+
+```json
+{
+  "height_cm": 170,
+  "payment_status": "due_soon",
+  "notes": "Actualizado desde Swagger"
+}
+```
+
+## Reglas iniciales de los CRUD
+
+- `organizations`: el borrado es lógico y desactiva la organización con `is_active = false`
+- `users`: el borrado es lógico y desactiva el usuario con `is_active = false`
+- `branches`: el borrado por defecto es lógico; si llamas `DELETE /branches/{id}?force=true`, intenta borrado físico
+- `classes`: el borrado es lógico y desactiva la clase con `is_active = false`
+- `class_schedules`: el borrado es físico porque la tabla no tiene `is_active` ni `deleted_at`
+- `class_enrollments`: el borrado es lógico y desactiva la inscripción con `is_active = false`
+- `attendance`: el borrado es físico porque la tabla no tiene `is_active` ni `deleted_at`
+- `students`: el borrado es lógico y llena `deleted_at`; además cambia `status` a `inactive`
+- `org_admin`: requiere `organization_id` y no acepta `branch_id`
+- `branch_admin`: requiere `organization_id` y `branch_id`
+- `student` y `super_admin`: no aceptan `organization_id` ni `branch_id`
+- En esta primera versión la API maneja una sola asignación administrativa principal por usuario
+- `classes`: la disciplina debe pertenecer a la misma organización que la clase
+- `classes`: la sucursal debe pertenecer a la organización indicada
+- `class_schedules`: `day_of_week` debe estar entre `0` y `6`
+- `class_schedules`: `start_time` debe ser menor que `end_time`
+- `class_enrollments`: el alumno y la clase deben pertenecer a la misma organización y sucursal
+- `class_enrollments`: no se permite inscribir alumnos con `deleted_at` informado
+- `class_enrollments`: la combinación `student_id + class_id` debe ser única
+- `attendance`: la sucursal del registro debe coincidir con la sucursal del alumno
+- `attendance`: si se informa `class_id`, la clase debe pertenecer a la misma organización y sucursal del alumno
+- `attendance`: no se permite registrar asistencia para alumnos con `deleted_at` informado
+- `attendance`: si se informa `registered_by`, el usuario debe existir y no puede tener rol `student`
+- `students`: si mandas `user_id`, el usuario vinculado debe existir y tener rol `student`
+- `students`: si mandas `primary_class_id`, la clase debe pertenecer a la misma organización y sucursal del alumno
+
+## Despliegue en el mismo VPS que MySQL
+
+Si MySQL y FastAPI viven en el mismo VPS, usa `127.0.0.1` en `DATABASE_URL`:
+
+```env
+DATABASE_URL=mysql+pymysql://eldojo_app:N7_xK9mP2_vQ@127.0.0.1:3306/eldojo_db
+```
+
+Pasos recomendados:
+
+1. Copia el proyecto al VPS
+2. Crea `.venv`
+3. Instala dependencias con `pip install -e .`
+4. Configura `.env`
+5. Lanza `uvicorn`
+6. Prueba `/api/v1/health` y `/api/v1/health/db`
+
+## Siguiente evolución sugerida
+
+- Agregar autenticación JWT
+- Crear módulos por dominio
+- Separar schemas Pydantic, servicios y repositorios
+- Añadir endpoint de login y permisos por rol

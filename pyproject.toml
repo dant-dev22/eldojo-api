@@ -1,0 +1,20 @@
+[project]
+name = "eldojo-backend-api"
+version = "0.1.0"
+description = "Backend inicial en FastAPI para la plataforma ElDojo."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi>=0.115,<1.0",
+    "uvicorn[standard]>=0.30,<1.0",
+    "SQLAlchemy>=2.0,<3.0",
+    "PyMySQL>=1.1,<2.0",
+    "python-dotenv>=1.0,<2.0",
+]
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["app*"]
