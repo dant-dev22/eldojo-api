@@ -40,6 +40,7 @@ class User(Base):
     )
     students = relationship("Student", back_populates="user")
     attendance_records = relationship("Attendance", back_populates="registered_by_user")
+    payments_recorded = relationship("Payment", back_populates="recorded_by_user")
 
 
 class AdminAssignment(Base):

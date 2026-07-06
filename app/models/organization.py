@@ -35,6 +35,7 @@ class Organization(Base):
     disciplines = relationship("Discipline", back_populates="organization")
     students = relationship("Student", back_populates="organization")
     classes = relationship("MartialClass", back_populates="organization")
+    payments = relationship("Payment", back_populates="organization")
 
 
 class Branch(Base):
@@ -71,3 +72,4 @@ class Branch(Base):
     students = relationship("Student", back_populates="branch")
     classes = relationship("MartialClass", back_populates="branch")
     attendance_records = relationship("Attendance", back_populates="branch")
+    payments = relationship("Payment", back_populates="branch")

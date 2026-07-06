@@ -7,7 +7,16 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.api.dependencies import require_active_user
+from app.core.authorization import (
+    ensure_can_create_organization,
+    ensure_can_delete_organization,
+    ensure_can_manage_organization,
+    ensure_can_read_organization,
+    scope_organization_filter,
+)
 from app.db.session import get_db
+from app.models.user import User
 from app.models.organization import Organization
 from app.schemas.common import MessageResponse
 from app.schemas.organization import (
@@ -36,9 +45,11 @@ def get_organization_or_404(db: Session, organization_id: int) -> Organization:
 def create_organization(
     payload: OrganizationCreate,
     db: Session = Depends(get_db),
+    current_user: User = Depends(require_active_user),
 ) -> Organization:
     """Crea una nueva organización tenant."""
 
+    ensure_can_create_organization(current_user)
     organization = Organization(**payload.model_dump())
     db.add(organization)
 
@@ -59,11 +70,15 @@ def create_organization(
 def list_organizations(
     is_active: bool | None = Query(default=None),
     db: Session = Depends(get_db),
+    current_user: User = Depends(require_active_user),
 ) -> list[Organization]:
     """Lista organizaciones con filtro opcional por estado."""
 
     query = select(Organization).order_by(Organization.id)
+    scoped_organization_id = scope_organization_filter(current_user, organization_id=None)
 
+    if scoped_organization_id is not None:
+        query = query.where(Organization.id == scoped_organization_id)
     if is_active is not None:
         query = query.where(Organization.is_active == is_active)
 
@@ -74,9 +89,11 @@ def list_organizations(
 def get_organization(
     organization_id: int,
     db: Session = Depends(get_db),
+    current_user: User = Depends(require_active_user),
 ) -> Organization:
     """Devuelve una organización por su id."""
 
+    ensure_can_read_organization(current_user, organization_id)
     return get_organization_or_404(db, organization_id)
 
 
@@ -85,9 +102,11 @@ def update_organization(
     organization_id: int,
     payload: OrganizationUpdate,
     db: Session = Depends(get_db),
+    current_user: User = Depends(require_active_user),
 ) -> Organization:
     """Actualiza de forma parcial una organización."""
 
+    ensure_can_manage_organization(current_user, organization_id)
     organization = get_organization_or_404(db, organization_id)
     changes = payload.model_dump(exclude_unset=True)
 
@@ -111,9 +130,11 @@ def update_organization(
 def delete_organization(
     organization_id: int,
     db: Session = Depends(get_db),
+    current_user: User = Depends(require_active_user),
 ) -> MessageResponse:
     """Realiza borrado lógico desactivando la organización."""
 
+    ensure_can_delete_organization(current_user)
     organization = get_organization_or_404(db, organization_id)
     organization.is_active = False
     db.commit()

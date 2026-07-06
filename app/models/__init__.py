@@ -1,6 +1,7 @@
 """Modelos ORM mínimos que el backend usa para operar sobre la DB existente."""
 
 from app.models.curriculum import Discipline
+from app.models.finance import Payment
 from app.models.organization import Branch, Organization
 from app.models.student import Student
 from app.models.teaching import Attendance, ClassEnrollment, ClassSchedule, MartialClass
@@ -15,6 +16,7 @@ __all__ = [
     "Discipline",
     "MartialClass",
     "Organization",
+    "Payment",
     "Student",
     "User",
 ]

@@ -46,6 +46,7 @@ class ClassRead(BaseModel):
     organization_id: int
     branch_id: int
     discipline_id: int
+    discipline_name: str | None = None
     name: str
     description: str | None
     instructor_name: str | None

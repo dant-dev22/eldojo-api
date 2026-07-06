@@ -39,6 +39,23 @@ class AttendanceMethod(str, Enum):
     MANUAL = "manual"
 
 
+class PaymentMethod(str, Enum):
+    """Método usado para registrar un pago."""
+
+    CASH = "cash"
+    TRANSFER = "transfer"
+    CARD = "card"
+    OTHER = "other"
+
+
+class PaymentRecordStatus(str, Enum):
+    """Estado del registro de pago."""
+
+    PAID = "paid"
+    PENDING = "pending"
+    VOID = "void"
+
+
 def db_enum(enum_class: type[Enum], *, name: str) -> SqlEnum:
     """Configura SQLAlchemy para persistir los valores reales del enum."""
 

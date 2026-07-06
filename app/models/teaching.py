@@ -53,6 +53,12 @@ class MartialClass(Base):
     enrollments = relationship("ClassEnrollment", back_populates="class_obj")
     attendance_records = relationship("Attendance", back_populates="class_obj")
 
+    @property
+    def discipline_name(self) -> str | None:
+        """Expone el nombre de la disciplina asociada para respuestas de API."""
+
+        return self.discipline.name if self.discipline is not None else None
+
 
 class ClassSchedule(Base):
     """Horario semanal recurrente de una clase."""

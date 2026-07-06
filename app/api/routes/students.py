@@ -5,10 +5,12 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.api.dependencies import require_active_user
+from app.core.authorization import ensure_can_access_operational_scope, scope_branch_filter
 from app.core.student_codes import build_student_unique_code
 from app.db.session import get_db
 from app.models.enums import StudentStatus, UserRole
@@ -79,9 +81,18 @@ def validate_student_links(
 
 
 @router.post("", response_model=StudentRead, status_code=status.HTTP_201_CREATED)
-def create_student(payload: StudentCreate, db: Session = Depends(get_db)) -> Student:
+def create_student(
+    payload: StudentCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_active_user),
+) -> Student:
     """Crea un alumno y genera su `unique_code` automáticamente."""
 
+    ensure_can_access_operational_scope(
+        current_user,
+        organization_id=payload.organization_id,
+        branch_id=payload.branch_id,
+    )
     organization = validate_student_links(
         db,
         organization_id=payload.organization_id,
@@ -114,11 +125,18 @@ def list_students(
     organization_id: int | None = Query(default=None, gt=0),
     branch_id: int | None = Query(default=None, gt=0),
     status_filter: StudentStatus | None = Query(default=None, alias="status"),
+    search: str | None = Query(default=None, min_length=1, max_length=100),
     include_deleted: bool = False,
     db: Session = Depends(get_db),
+    current_user: User = Depends(require_active_user),
 ) -> list[Student]:
-    """Lista alumnos con filtros por organización, sucursal y estado."""
+    """Lista alumnos con filtros por organización, sucursal, estado y nombre."""
 
+    organization_id, branch_id = scope_branch_filter(
+        current_user,
+        organization_id=organization_id,
+        branch_id=branch_id,
+    )
     query = select(Student).order_by(Student.id)
 
     if organization_id is not None:
@@ -127,6 +145,14 @@ def list_students(
         query = query.where(Student.branch_id == branch_id)
     if status_filter is not None:
         query = query.where(Student.status == status_filter)
+    if search is not None:
+        search_term = f"%{search.strip()}%"
+        query = query.where(
+            or_(
+                Student.first_name.like(search_term),
+                Student.last_name.like(search_term),
+            )
+        )
     if not include_deleted:
         query = query.where(Student.deleted_at.is_(None))
 
@@ -138,10 +164,16 @@ def get_student(
     student_id: int,
     include_deleted: bool = False,
     db: Session = Depends(get_db),
+    current_user: User = Depends(require_active_user),
 ) -> Student:
     """Devuelve un alumno por su id."""
 
     student = get_student_or_404(db, student_id)
+    ensure_can_access_operational_scope(
+        current_user,
+        organization_id=student.organization_id,
+        branch_id=student.branch_id,
+    )
     if student.deleted_at is not None and not include_deleted:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Alumno no encontrado")
     return student
@@ -152,6 +184,7 @@ def update_student(
     student_id: int,
     payload: StudentUpdate,
     db: Session = Depends(get_db),
+    current_user: User = Depends(require_active_user),
 ) -> Student:
     """Actualiza de forma parcial un alumno existente."""
 
@@ -162,6 +195,12 @@ def update_student(
     branch_id = changes.get("branch_id", student.branch_id)
     user_id = changes.get("user_id", student.user_id)
     primary_class_id = changes.get("primary_class_id", student.primary_class_id)
+
+    ensure_can_access_operational_scope(
+        current_user,
+        organization_id=organization_id,
+        branch_id=branch_id,
+    )
 
     validate_student_links(
         db,
@@ -188,10 +227,19 @@ def update_student(
 
 
 @router.delete("/{student_id}", response_model=MessageResponse)
-def delete_student(student_id: int, db: Session = Depends(get_db)) -> MessageResponse:
+def delete_student(
+    student_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_active_user),
+) -> MessageResponse:
     """Realiza el soft delete del alumno."""
 
     student = get_student_or_404(db, student_id)
+    ensure_can_access_operational_scope(
+        current_user,
+        organization_id=student.organization_id,
+        branch_id=student.branch_id,
+    )
     student.deleted_at = datetime.now(timezone.utc).replace(tzinfo=None)
     student.status = StudentStatus.INACTIVE
     db.commit()

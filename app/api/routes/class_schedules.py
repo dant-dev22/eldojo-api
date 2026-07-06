@@ -9,8 +9,12 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.api.dependencies import require_active_user
+from app.core.authorization import ensure_can_access_operational_scope, scope_branch_filter
 from app.db.session import get_db
+from app.models.enums import UserRole
 from app.models.teaching import ClassSchedule, MartialClass
+from app.models.user import User
 from app.schemas.class_schedule import (
     ClassScheduleCreate,
     ClassScheduleRead,
@@ -53,10 +57,17 @@ def ensure_valid_time_range(start_time: time, end_time: time) -> None:
 def create_class_schedule(
     payload: ClassScheduleCreate,
     db: Session = Depends(get_db),
+    current_user: User = Depends(require_active_user),
 ) -> ClassSchedule:
     """Crea un horario semanal para una clase existente."""
 
     ensure_class_exists(db, payload.class_id)
+    class_obj = db.get(MartialClass, payload.class_id)
+    ensure_can_access_operational_scope(
+        current_user,
+        organization_id=class_obj.organization_id,  # type: ignore[union-attr]
+        branch_id=class_obj.branch_id,  # type: ignore[union-attr]
+    )
     ensure_valid_time_range(payload.start_time, payload.end_time)
 
     schedule = ClassSchedule(**payload.model_dump())
@@ -80,14 +91,36 @@ def list_class_schedules(
     class_id: int | None = Query(default=None, gt=0),
     day_of_week: int | None = Query(default=None, ge=0, le=6),
     db: Session = Depends(get_db),
+    current_user: User = Depends(require_active_user),
 ) -> list[ClassSchedule]:
     """Lista horarios con filtros por clase y día de la semana."""
 
+    if class_id is not None:
+        class_obj = db.get(MartialClass, class_id)
+        if class_obj is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Clase no encontrada")
+        ensure_can_access_operational_scope(
+            current_user,
+            organization_id=class_obj.organization_id,
+            branch_id=class_obj.branch_id,
+        )
+
+    organization_id, branch_id = scope_branch_filter(
+        current_user,
+        organization_id=None,
+        branch_id=None,
+    )
     query = select(ClassSchedule).order_by(
         ClassSchedule.class_id,
         ClassSchedule.day_of_week,
         ClassSchedule.start_time,
     )
+    if current_user.role != UserRole.SUPER_ADMIN:
+        query = query.join(MartialClass, MartialClass.id == ClassSchedule.class_id)
+        if organization_id is not None:
+            query = query.where(MartialClass.organization_id == organization_id)
+        if branch_id is not None:
+            query = query.where(MartialClass.branch_id == branch_id)
 
     if class_id is not None:
         query = query.where(ClassSchedule.class_id == class_id)
@@ -98,10 +131,23 @@ def list_class_schedules(
 
 
 @router.get("/{schedule_id}", response_model=ClassScheduleRead)
-def get_class_schedule(schedule_id: int, db: Session = Depends(get_db)) -> ClassSchedule:
+def get_class_schedule(
+    schedule_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_active_user),
+) -> ClassSchedule:
     """Devuelve un horario por su id."""
 
-    return get_schedule_or_404(db, schedule_id)
+    schedule = get_schedule_or_404(db, schedule_id)
+    class_obj = db.get(MartialClass, schedule.class_id)
+    if class_obj is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Clase no encontrada")
+    ensure_can_access_operational_scope(
+        current_user,
+        organization_id=class_obj.organization_id,
+        branch_id=class_obj.branch_id,
+    )
+    return schedule
 
 
 @router.patch("/{schedule_id}", response_model=ClassScheduleRead)
@@ -109,6 +155,7 @@ def update_class_schedule(
     schedule_id: int,
     payload: ClassScheduleUpdate,
     db: Session = Depends(get_db),
+    current_user: User = Depends(require_active_user),
 ) -> ClassSchedule:
     """Actualiza de forma parcial un horario existente."""
 
@@ -120,6 +167,12 @@ def update_class_schedule(
     end_time = changes.get("end_time", schedule.end_time)
 
     ensure_class_exists(db, class_id)
+    class_obj = db.get(MartialClass, class_id)
+    ensure_can_access_operational_scope(
+        current_user,
+        organization_id=class_obj.organization_id,  # type: ignore[union-attr]
+        branch_id=class_obj.branch_id,  # type: ignore[union-attr]
+    )
     ensure_valid_time_range(start_time, end_time)
 
     for field_name, value in changes.items():
@@ -139,7 +192,11 @@ def update_class_schedule(
 
 
 @router.delete("/{schedule_id}", response_model=MessageResponse)
-def delete_class_schedule(schedule_id: int, db: Session = Depends(get_db)) -> MessageResponse:
+def delete_class_schedule(
+    schedule_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_active_user),
+) -> MessageResponse:
     """Elimina físicamente un horario de clase.
 
     La tabla no tiene soft delete ni bandera activa, así que en esta primera versión
@@ -147,6 +204,14 @@ def delete_class_schedule(schedule_id: int, db: Session = Depends(get_db)) -> Me
     """
 
     schedule = get_schedule_or_404(db, schedule_id)
+    class_obj = db.get(MartialClass, schedule.class_id)
+    if class_obj is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Clase no encontrada")
+    ensure_can_access_operational_scope(
+        current_user,
+        organization_id=class_obj.organization_id,
+        branch_id=class_obj.branch_id,
+    )
     db.delete(schedule)
     db.commit()
     return MessageResponse(message="Horario eliminado correctamente")

@@ -3,14 +3,21 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
+from app.api.dependencies import require_active_user
+from app.core.authorization import (
+    ensure_can_access_users_endpoint,
+    ensure_can_manage_user_role,
+    get_admin_scope_ids,
+)
 from app.core.security import hash_password
 from app.db.session import get_db
 from app.models.enums import UserRole
 from app.models.organization import Branch, Organization
+from app.models.student import Student
 from app.models.user import AdminAssignment, User
 from app.schemas.common import MessageResponse
 from app.schemas.user import UserCreate, UserRead, UserUpdate
@@ -119,9 +126,72 @@ def sync_admin_scope(
     )
 
 
+def get_student_scope_for_user(db: Session, user_id: int) -> tuple[int, int] | None:
+    """Obtiene el alcance de un usuario student si ya está ligado a un alumno."""
+
+    student = db.scalar(
+        select(Student)
+        .where(Student.user_id == user_id)
+        .where(Student.deleted_at.is_(None))
+        .order_by(Student.id)
+    )
+    if student is None:
+        return None
+    return student.organization_id, student.branch_id
+
+
+def ensure_can_manage_target_user(db: Session, current_user: User, target_user: User) -> None:
+    """Valida que el usuario autenticado pueda ver o modificar al usuario objetivo."""
+
+    if current_user.role == UserRole.SUPER_ADMIN:
+        return
+
+    ensure_can_access_users_endpoint(current_user)
+
+    if target_user.role == UserRole.SUPER_ADMIN:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Solo un super_admin puede gestionar usuarios super_admin",
+        )
+
+    if target_user.id == current_user.id:
+        return
+
+    current_organization_id, _ = get_admin_scope_ids(current_user)
+
+    if target_user.admin_assignments:
+        target_scope = target_user.admin_assignments[0]
+        if target_scope.organization_id == current_organization_id:
+            return
+    else:
+        student_scope = get_student_scope_for_user(db, target_user.id)
+        if student_scope is not None and student_scope[0] == current_organization_id:
+            return
+
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="No tienes permisos para gestionar ese usuario",
+    )
+
+
 @router.post("", response_model=UserRead, status_code=status.HTTP_201_CREATED)
-def create_user(payload: UserCreate, db: Session = Depends(get_db)) -> User:
+def create_user(
+    payload: UserCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_active_user),
+) -> User:
     """Crea un usuario y, si aplica, su alcance administrativo inicial."""
+
+    ensure_can_access_users_endpoint(current_user)
+    ensure_can_manage_user_role(current_user, payload.role)
+
+    if current_user.role == UserRole.ORG_ADMIN and payload.role in SCOPED_ADMIN_ROLES:
+        current_organization_id, _ = get_admin_scope_ids(current_user)
+        if payload.organization_id != current_organization_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="No puedes crear administradores fuera de tu organización",
+            )
 
     ensure_valid_scope(db, payload.role, payload.organization_id, payload.branch_id)
 
@@ -153,30 +223,73 @@ def list_users(
     organization_id: int | None = Query(default=None, gt=0),
     branch_id: int | None = Query(default=None, gt=0),
     db: Session = Depends(get_db),
+    current_user: User = Depends(require_active_user),
 ) -> list[User]:
     """Lista usuarios con filtros básicos por rol, estado y alcance."""
 
+    ensure_can_access_users_endpoint(current_user)
     query = select(User).options(selectinload(User.admin_assignments)).order_by(User.id)
 
     if role is not None:
         query = query.where(User.role == role)
     if is_active is not None:
         query = query.where(User.is_active == is_active)
-    if organization_id is not None or branch_id is not None:
-        query = query.join(User.admin_assignments)
-    if organization_id is not None:
-        query = query.where(AdminAssignment.organization_id == organization_id)
+
+    if current_user.role == UserRole.SUPER_ADMIN:
+        if organization_id is not None or branch_id is not None:
+            query = query.join(User.admin_assignments)
+        if organization_id is not None:
+            query = query.where(AdminAssignment.organization_id == organization_id)
+        if branch_id is not None:
+            query = query.where(AdminAssignment.branch_id == branch_id)
+        return list(db.scalars(query.distinct()).all())
+
+    current_organization_id, _ = get_admin_scope_ids(current_user)
+    if organization_id is not None and organization_id != current_organization_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="El filtro organization_id está fuera de tu alcance",
+        )
+    organization_id = current_organization_id
+
+    admin_user_ids = select(AdminAssignment.user_id).where(
+        AdminAssignment.organization_id == organization_id
+    )
     if branch_id is not None:
-        query = query.where(AdminAssignment.branch_id == branch_id)
+        admin_user_ids = admin_user_ids.where(
+            or_(AdminAssignment.branch_id == branch_id, AdminAssignment.branch_id.is_(None))
+        )
+
+    student_user_ids = (
+        select(Student.user_id)
+        .where(Student.organization_id == organization_id)
+        .where(Student.user_id.is_not(None))
+        .where(Student.deleted_at.is_(None))
+    )
+    if branch_id is not None:
+        student_user_ids = student_user_ids.where(Student.branch_id == branch_id)
+
+    query = query.where(
+        or_(
+            User.id.in_(admin_user_ids),
+            User.id.in_(student_user_ids),
+        )
+    )
 
     return list(db.scalars(query.distinct()).all())
 
 
 @router.get("/{user_id}", response_model=UserRead)
-def get_user(user_id: int, db: Session = Depends(get_db)) -> User:
+def get_user(
+    user_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_active_user),
+) -> User:
     """Devuelve un usuario por su id."""
 
-    return get_user_or_404(db, user_id)
+    user = get_user_or_404(db, user_id)
+    ensure_can_manage_target_user(db, current_user, user)
+    return user
 
 
 @router.patch("/{user_id}", response_model=UserRead)
@@ -184,13 +297,17 @@ def update_user(
     user_id: int,
     payload: UserUpdate,
     db: Session = Depends(get_db),
+    current_user: User = Depends(require_active_user),
 ) -> User:
     """Actualiza de forma parcial un usuario y su alcance principal."""
 
+    ensure_can_access_users_endpoint(current_user)
     user = get_user_or_404(db, user_id)
+    ensure_can_manage_target_user(db, current_user, user)
     changes = payload.model_dump(exclude_unset=True)
 
     target_role = changes.get("role", user.role)
+    ensure_can_manage_user_role(current_user, target_role)
     current_scope = user.admin_assignments[0] if user.admin_assignments else None
 
     if target_role in SCOPED_ADMIN_ROLES:
@@ -205,6 +322,14 @@ def update_user(
     else:
         organization_id = changes.get("organization_id")
         branch_id = changes.get("branch_id")
+
+    if current_user.role == UserRole.ORG_ADMIN and target_role in SCOPED_ADMIN_ROLES:
+        current_organization_id, _ = get_admin_scope_ids(current_user)
+        if organization_id != current_organization_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="No puedes mover administradores fuera de tu organización",
+            )
 
     ensure_valid_scope(db, target_role, organization_id, branch_id)
 
@@ -231,10 +356,16 @@ def update_user(
 
 
 @router.delete("/{user_id}", response_model=MessageResponse)
-def delete_user(user_id: int, db: Session = Depends(get_db)) -> MessageResponse:
+def delete_user(
+    user_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_active_user),
+) -> MessageResponse:
     """Realiza borrado lógico desactivando el usuario."""
 
+    ensure_can_access_users_endpoint(current_user)
     user = get_user_or_404(db, user_id)
+    ensure_can_manage_target_user(db, current_user, user)
     user.is_active = False
     db.commit()
     return MessageResponse(message="Usuario desactivado correctamente")

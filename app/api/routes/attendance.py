@@ -7,6 +7,8 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.api.dependencies import require_active_user
+from app.core.authorization import ensure_can_access_operational_scope, scope_branch_filter
 from app.db.session import get_db
 from app.models.enums import AttendanceMethod, UserRole
 from app.models.organization import Branch
@@ -79,9 +81,21 @@ def validate_attendance_links(
 
 
 @router.post("", response_model=AttendanceRead, status_code=status.HTTP_201_CREATED)
-def create_attendance(payload: AttendanceCreate, db: Session = Depends(get_db)) -> Attendance:
+def create_attendance(
+    payload: AttendanceCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_active_user),
+) -> Attendance:
     """Crea un registro de asistencia."""
 
+    student = db.get(Student, payload.student_id)
+    if student is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Alumno no encontrado")
+    ensure_can_access_operational_scope(
+        current_user,
+        organization_id=student.organization_id,
+        branch_id=payload.branch_id,
+    )
     validate_attendance_links(
         db,
         student_id=payload.student_id,
@@ -113,10 +127,18 @@ def list_attendance(
     class_id: int | None = Query(default=None, gt=0),
     method: AttendanceMethod | None = None,
     db: Session = Depends(get_db),
+    current_user: User = Depends(require_active_user),
 ) -> list[Attendance]:
     """Lista asistencias con filtros básicos."""
 
+    organization_id, branch_id = scope_branch_filter(
+        current_user,
+        organization_id=None,
+        branch_id=branch_id,
+    )
     query = select(Attendance).order_by(Attendance.check_in_at.desc(), Attendance.id.desc())
+    if organization_id is not None:
+        query = query.join(Branch, Branch.id == Attendance.branch_id).where(Branch.organization_id == organization_id)
 
     if student_id is not None:
         query = query.where(Attendance.student_id == student_id)
@@ -131,10 +153,23 @@ def list_attendance(
 
 
 @router.get("/{attendance_id}", response_model=AttendanceRead)
-def get_attendance(attendance_id: int, db: Session = Depends(get_db)) -> Attendance:
+def get_attendance(
+    attendance_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_active_user),
+) -> Attendance:
     """Devuelve una asistencia por su id."""
 
-    return get_attendance_or_404(db, attendance_id)
+    attendance = get_attendance_or_404(db, attendance_id)
+    student = db.get(Student, attendance.student_id)
+    if student is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Alumno no encontrado")
+    ensure_can_access_operational_scope(
+        current_user,
+        organization_id=student.organization_id,
+        branch_id=attendance.branch_id,
+    )
+    return attendance
 
 
 @router.patch("/{attendance_id}", response_model=AttendanceRead)
@@ -142,6 +177,7 @@ def update_attendance(
     attendance_id: int,
     payload: AttendanceUpdate,
     db: Session = Depends(get_db),
+    current_user: User = Depends(require_active_user),
 ) -> Attendance:
     """Actualiza de forma parcial un registro de asistencia."""
 
@@ -152,6 +188,15 @@ def update_attendance(
     branch_id = changes.get("branch_id", attendance.branch_id)
     class_id = changes.get("class_id", attendance.class_id)
     registered_by = changes.get("registered_by", attendance.registered_by)
+
+    student = db.get(Student, student_id)
+    if student is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Alumno no encontrado")
+    ensure_can_access_operational_scope(
+        current_user,
+        organization_id=student.organization_id,
+        branch_id=branch_id,
+    )
 
     validate_attendance_links(
         db,
@@ -178,7 +223,11 @@ def update_attendance(
 
 
 @router.delete("/{attendance_id}", response_model=MessageResponse)
-def delete_attendance(attendance_id: int, db: Session = Depends(get_db)) -> MessageResponse:
+def delete_attendance(
+    attendance_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_active_user),
+) -> MessageResponse:
     """Elimina físicamente una asistencia.
 
     La tabla no tiene soft delete ni bandera activa, así que esta primera versión
@@ -186,6 +235,14 @@ def delete_attendance(attendance_id: int, db: Session = Depends(get_db)) -> Mess
     """
 
     attendance = get_attendance_or_404(db, attendance_id)
+    student = db.get(Student, attendance.student_id)
+    if student is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Alumno no encontrado")
+    ensure_can_access_operational_scope(
+        current_user,
+        organization_id=student.organization_id,
+        branch_id=attendance.branch_id,
+    )
     db.delete(attendance)
     db.commit()
     return MessageResponse(message="Asistencia eliminada correctamente")

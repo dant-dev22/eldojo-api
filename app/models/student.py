@@ -74,3 +74,4 @@ class Student(Base):
     primary_class = relationship("MartialClass", back_populates="students")
     class_enrollments = relationship("ClassEnrollment", back_populates="student")
     attendance_records = relationship("Attendance", back_populates="student")
+    payments = relationship("Payment", back_populates="student")

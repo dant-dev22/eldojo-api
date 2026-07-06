@@ -7,10 +7,13 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.api.dependencies import require_active_user
+from app.core.authorization import ensure_can_access_operational_scope, scope_branch_filter
 from app.db.session import get_db
 from app.models.curriculum import Discipline
 from app.models.organization import Branch, Organization
 from app.models.teaching import MartialClass
+from app.models.user import User
 from app.schemas.class_ import ClassCreate, ClassRead, ClassUpdate
 from app.schemas.common import MessageResponse
 
@@ -60,9 +63,18 @@ def validate_class_links(
 
 
 @router.post("", response_model=ClassRead, status_code=status.HTTP_201_CREATED)
-def create_class(payload: ClassCreate, db: Session = Depends(get_db)) -> MartialClass:
+def create_class(
+    payload: ClassCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_active_user),
+) -> MartialClass:
     """Crea una clase ligada a organización, sucursal y disciplina válidas."""
 
+    ensure_can_access_operational_scope(
+        current_user,
+        organization_id=payload.organization_id,
+        branch_id=payload.branch_id,
+    )
     validate_class_links(
         db,
         organization_id=payload.organization_id,
@@ -93,9 +105,15 @@ def list_classes(
     discipline_id: int | None = Query(default=None, gt=0),
     is_active: bool | None = None,
     db: Session = Depends(get_db),
+    current_user: User = Depends(require_active_user),
 ) -> list[MartialClass]:
     """Lista clases con filtros básicos."""
 
+    organization_id, branch_id = scope_branch_filter(
+        current_user,
+        organization_id=organization_id,
+        branch_id=branch_id,
+    )
     query = select(MartialClass).order_by(MartialClass.id)
 
     if organization_id is not None:
@@ -111,10 +129,20 @@ def list_classes(
 
 
 @router.get("/{class_id}", response_model=ClassRead)
-def get_class(class_id: int, db: Session = Depends(get_db)) -> MartialClass:
+def get_class(
+    class_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_active_user),
+) -> MartialClass:
     """Devuelve una clase por su id."""
 
-    return get_class_or_404(db, class_id)
+    class_obj = get_class_or_404(db, class_id)
+    ensure_can_access_operational_scope(
+        current_user,
+        organization_id=class_obj.organization_id,
+        branch_id=class_obj.branch_id,
+    )
+    return class_obj
 
 
 @router.patch("/{class_id}", response_model=ClassRead)
@@ -122,6 +150,7 @@ def update_class(
     class_id: int,
     payload: ClassUpdate,
     db: Session = Depends(get_db),
+    current_user: User = Depends(require_active_user),
 ) -> MartialClass:
     """Actualiza de forma parcial una clase."""
 
@@ -131,6 +160,12 @@ def update_class(
     organization_id = changes.get("organization_id", class_obj.organization_id)
     branch_id = changes.get("branch_id", class_obj.branch_id)
     discipline_id = changes.get("discipline_id", class_obj.discipline_id)
+
+    ensure_can_access_operational_scope(
+        current_user,
+        organization_id=organization_id,
+        branch_id=branch_id,
+    )
 
     validate_class_links(
         db,
@@ -156,10 +191,19 @@ def update_class(
 
 
 @router.delete("/{class_id}", response_model=MessageResponse)
-def delete_class(class_id: int, db: Session = Depends(get_db)) -> MessageResponse:
+def delete_class(
+    class_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_active_user),
+) -> MessageResponse:
     """Realiza borrado lógico desactivando la clase."""
 
     class_obj = get_class_or_404(db, class_id)
+    ensure_can_access_operational_scope(
+        current_user,
+        organization_id=class_obj.organization_id,
+        branch_id=class_obj.branch_id,
+    )
     class_obj.is_active = False
     db.commit()
     return MessageResponse(message="Clase desactivada correctamente")
