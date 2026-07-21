@@ -3,3 +3,4 @@ uvicorn[standard]<1.0,>=0.30
 SQLAlchemy<3.0,>=2.0
 PyMySQL<2.0,>=1.1
 python-dotenv<2.0,>=1.0
+python-multipart<1.0,>=0.0.9

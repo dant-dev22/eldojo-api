@@ -49,6 +49,30 @@ class StudentRegisterRequest(BaseModel):
         return value.strip().lower()
 
 
+class AcademyRegisterRequest(BaseModel):
+    """Payload público para crear una academia y su admin inicial."""
+
+    academy_name: str = Field(min_length=2, max_length=150)
+    admin_first_name: str = Field(min_length=2, max_length=100)
+    admin_last_name: str = Field(min_length=2, max_length=100)
+    email: str = Field(min_length=5, max_length=255)
+    password: str = Field(min_length=8, max_length=128)
+
+    @field_validator("academy_name", "admin_first_name", "admin_last_name")
+    @classmethod
+    def normalize_text(cls, value: str) -> str:
+        """Elimina espacios sobrantes en campos de texto visibles."""
+
+        return " ".join(value.strip().split())
+
+    @field_validator("email")
+    @classmethod
+    def normalize_academy_register_email(cls, value: str) -> str:
+        """Normaliza el email del admin inicial."""
+
+        return value.strip().lower()
+
+
 class TokenResponse(BaseModel):
     """Respuesta de autenticación exitosa."""
 

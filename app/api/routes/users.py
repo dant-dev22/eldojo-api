@@ -196,6 +196,8 @@ def create_user(
     ensure_valid_scope(db, payload.role, payload.organization_id, payload.branch_id)
 
     user = User(
+        first_name=payload.first_name,
+        last_name=payload.last_name,
         email=payload.email,
         password_hash=hash_password(payload.password),
         role=payload.role,
@@ -335,6 +337,10 @@ def update_user(
 
     if "email" in changes:
         user.email = changes["email"]
+    if "first_name" in changes:
+        user.first_name = changes["first_name"]
+    if "last_name" in changes:
+        user.last_name = changes["last_name"]
     if "password" in changes:
         user.password_hash = hash_password(changes["password"])
     if "is_active" in changes:

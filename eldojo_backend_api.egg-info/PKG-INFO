@@ -9,6 +9,7 @@ Requires-Dist: uvicorn[standard]<1.0,>=0.30
 Requires-Dist: SQLAlchemy<3.0,>=2.0
 Requires-Dist: PyMySQL<2.0,>=1.1
 Requires-Dist: python-dotenv<2.0,>=1.0
+Requires-Dist: python-multipart<1.0,>=0.0.9
 
 # eldojo-backend-api
 
@@ -21,6 +22,8 @@ Backend inicial en FastAPI para conectarse a la base de datos de `eldojo`.
 - Conexión a MySQL con SQLAlchemy 2.x y PyMySQL
 - Endpoint de salud de la API
 - Endpoint de salud de la base de datos
+- Autenticación Bearer con access token + refresh token
+- Endpoints móviles para registro de alumno y perfil propio
 - CRUD inicial de organizaciones
 - CRUD inicial de usuarios
 - CRUD inicial de sucursales
@@ -29,6 +32,7 @@ Backend inicial en FastAPI para conectarse a la base de datos de `eldojo`.
 - CRUD inicial de inscripciones a clase
 - CRUD inicial de asistencia
 - CRUD inicial de alumnos
+- CRUD inicial de pagos
 
 ## Estructura
 
@@ -43,9 +47,21 @@ app/
 
 ## Requisitos
 
-- Python 3.11+
+- Python 3.10+
 - MySQL 8 corriendo
 - Base de datos `eldojo_db` ya creada y migrada desde el proyecto de DB
+
+## Cambio manual reciente
+
+Para soportar `first_name` y `last_name` en usuarios administrativos, aplica antes este SQL:
+
+```sql
+ALTER TABLE users
+    ADD COLUMN first_name VARCHAR(100) NULL AFTER id,
+    ADD COLUMN last_name VARCHAR(100) NULL AFTER first_name;
+```
+
+También queda disponible el archivo `manual_migration_20260720_add_user_names.sql` en la raíz del proyecto.
 
 ## Instalación local
 
@@ -81,7 +97,19 @@ APP_ENV=development
 APP_DEBUG=true
 API_V1_PREFIX=/api/v1
 DATABASE_URL=mysql+pymysql://eldojo_app:N7_xK9mP2_vQ@127.0.0.1:3306/eldojo_db
+AUTH_SECRET_KEY=change-this-in-production-eldojo
+AUTH_ALGORITHM=HS256
+AUTH_ISSUER=eldojo-backend-api
+AUTH_ACCESS_TOKEN_EXPIRE_MINUTES=120
+AUTH_REFRESH_TOKEN_EXPIRE_DAYS=30
+BACKEND_CORS_ORIGINS=http://localhost:8081,http://127.0.0.1:8081,http://localhost:19006,http://127.0.0.1:19006
+UPLOADS_DIR=uploads
+UPLOADS_URL_PREFIX=/uploads
 ```
+
+Si vas a consumir la API desde Expo web en local, asegúrate de incluir el origen del
+frontend en `BACKEND_CORS_ORIGINS`. Para la configuración actual de desarrollo, los
+orígenes por defecto ya contemplan `http://localhost:8081` y `http://127.0.0.1:8081`.
 
 ## Ejecutar la API
 
@@ -102,6 +130,13 @@ uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 - `GET /redoc`
 - `GET /api/v1/health`
 - `GET /api/v1/health/db`
+- `POST /api/v1/auth/login`
+- `POST /api/v1/auth/refresh`
+- `POST /api/v1/auth/academy/register`
+- `POST /api/v1/auth/student/register`
+- `GET /api/v1/auth/me`
+- `GET /api/v1/me`
+- `PATCH /api/v1/me`
 - `POST /api/v1/organizations`
 - `GET /api/v1/organizations`
 - `GET /api/v1/organizations/{organization_id}`
@@ -141,7 +176,120 @@ uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 - `GET /api/v1/students/{student_id}`
 - `PATCH /api/v1/students/{student_id}`
 - `DELETE /api/v1/students/{student_id}`
+- `POST /api/v1/payments`
+- `GET /api/v1/payments`
+- `GET /api/v1/payments/{payment_id}`
+- `PATCH /api/v1/payments/{payment_id}`
+- `DELETE /api/v1/payments/{payment_id}`
 - `DELETE /api/v1/branches/{branch_id}`
+
+## Autenticación
+
+Todos los CRUD de negocio ahora requieren Bearer token. Los únicos endpoints
+abiertos son:
+
+- `GET /`
+- `GET /docs`
+- `GET /redoc`
+- `GET /api/v1/health`
+- `GET /api/v1/health/db`
+- `POST /api/v1/auth/login`
+- `POST /api/v1/auth/refresh`
+- `POST /api/v1/auth/academy/register`
+- `POST /api/v1/auth/student/register`
+
+Si usaste el seed de la base de datos, puedes iniciar sesión con:
+
+```text
+email: dantedev22@gmail.com
+password: d4nt3r4d
+```
+
+Ejemplo de `POST /api/v1/auth/login`:
+
+```json
+{
+  "email": "dantedev22@gmail.com",
+  "password": "d4nt3r4d"
+}
+```
+
+Ejemplo de `POST /api/v1/auth/academy/register`:
+
+```json
+{
+  "academy_name": "Union MMA",
+  "admin_first_name": "Dante",
+  "admin_last_name": "Ramirez",
+  "email": "admin.union@example.com",
+  "password": "d4nt3r4d123"
+}
+```
+
+Para probar rápido desde VS Code o clientes compatibles, usa el archivo `academy-register.http`.
+
+La respuesta ahora trae:
+
+- `access_token`
+- `refresh_token`
+- `expires_in`
+- `refresh_expires_in`
+- `user`
+
+Usa el `access_token` en Swagger con el botón `Authorize` en este formato:
+
+```text
+Bearer TU_ACCESS_TOKEN
+```
+
+## Autorización por rol
+
+La API ya aplica una primera capa de permisos por rol y alcance:
+
+- `super_admin`: acceso total a todos los endpoints
+- `org_admin`: acceso a recursos de su organización; no puede crear ni desactivar organizaciones, ni gestionar usuarios `super_admin`
+- `branch_admin`: acceso operativo solo a su sucursal para clases, alumnos, pagos, asistencia e inscripciones; puede consultar su organización y administrar su propia sucursal
+- `student`: puede autenticarse, renovar sesión, registrar su cuenta y usar `GET/PATCH /api/v1/me`
+
+## Endpoints móviles clave
+
+Estos endpoints se añadieron para soportar la Fase 1 de la app Expo:
+
+- `POST /api/v1/auth/login`: inicia sesión y devuelve access + refresh token
+- `POST /api/v1/auth/refresh`: renueva la sesión cuando el access token expira
+- `POST /api/v1/auth/student/register`: vincula un alumno existente usando `unique_code`
+- `GET /api/v1/me`: devuelve el perfil del alumno autenticado con clases disponibles
+- `PATCH /api/v1/me`: actualiza foto de perfil y/o clase actual
+- `GET /api/v1/students?search=juan`: búsqueda simple por nombre para el stack admin
+
+### Ejemplo de refresh
+
+```json
+{
+  "refresh_token": "TU_REFRESH_TOKEN"
+}
+```
+
+### Ejemplo de registro de alumno
+
+```json
+{
+  "unique_code": "ABC12345",
+  "email": "alumno@dojo.com",
+  "password": "claveSegura123"
+}
+```
+
+### Ejemplo de actualización de perfil móvil
+
+`PATCH /api/v1/me` espera `multipart/form-data` con alguno de estos campos:
+
+- `primary_class_id`
+- `photo`
+
+Importante: el usuario semilla `dantedev22@gmail.com` nace como `org_admin`, así que
+si haces `POST /api/v1/organizations` o `DELETE /api/v1/organizations/{id}` con ese
+token, la API responderá `403`.
 
 ## Cómo probar la conexión a la DB
 
@@ -174,6 +322,14 @@ Respuesta esperada:
 
 La base semilla deja una organización inicial, normalmente con `id = 1`. Puedes
 confirmarlo con `GET /api/v1/health/db` o consultando directo en MySQL.
+
+Antes de probar los CRUD:
+
+1. Ejecuta `POST /api/v1/auth/login`
+2. Copia el `access_token`
+3. Pulsa `Authorize` en Swagger
+4. Pega `Bearer TU_ACCESS_TOKEN`
+5. Ahora prueba los endpoints protegidos
 
 ### Crear organización
 
@@ -266,6 +422,33 @@ así que no tienes que enviarlo en el request.
   "notes": "Alumno nuevo de prueba"
 }
 ```
+
+### Registrar pago
+
+Usa un `student_id` ya existente y un `recorded_by` que apunte a un usuario admin,
+no a un usuario con rol `student`.
+
+```json
+{
+  "student_id": 1,
+  "organization_id": 1,
+  "branch_id": 1,
+  "amount": 1200.00,
+  "currency": "MXN",
+  "period_start": "2026-07-01",
+  "period_end": "2026-07-31",
+  "paid_at": "2026-07-05T19:00:00",
+  "method": "transfer",
+  "status": "paid",
+  "recorded_by": 2,
+  "notes": "Pago de mensualidad julio"
+}
+```
+
+### Anular pago
+
+`DELETE /api/v1/payments/{payment_id}` no borra físicamente el registro; cambia su
+estado a `void` para preservar el historial financiero.
 
 ### Crear clase
 
@@ -434,22 +617,276 @@ Ejemplo de `PATCH /api/v1/students/1`:
 - `students`: si mandas `user_id`, el usuario vinculado debe existir y tener rol `student`
 - `students`: si mandas `primary_class_id`, la clase debe pertenecer a la misma organización y sucursal del alumno
 
-## Despliegue en el mismo VPS que MySQL
+## Despliegue a VPS
 
-Si MySQL y FastAPI viven en el mismo VPS, usa `127.0.0.1` en `DATABASE_URL`:
+Esta API esta pensada para vivir en el mismo VPS donde ya corre MySQL o en uno que
+pueda conectarse de forma privada a esa base de datos. Como en tu caso la DB ya esta
+levantada en el VPS, el flujo recomendado es:
 
-```env
-DATABASE_URL=mysql+pymysql://eldojo_app:N7_xK9mP2_vQ@127.0.0.1:3306/eldojo_db
+1. subir este repo al servidor
+2. crear un entorno virtual de Python
+3. configurar `.env` con valores de produccion
+4. dejar la API corriendo como servicio permanente
+5. publicar la API con `nginx`
+
+### Metodo recomendado para dejar Python corriendo
+
+Para este proyecto, el camino mas comun y estable en un VPS Linux es:
+
+- `gunicorn` como administrador del proceso
+- `uvicorn` como worker ASGI para FastAPI
+- `systemd` para que el servicio arranque solo al reiniciar el VPS
+- `nginx` como puerta de entrada publica
+
+### Requisitos recomendados en el VPS
+
+- Ubuntu/Debian con acceso por SSH
+- Python 3.10+
+- `python3-venv`
+- `nginx`
+- `git`
+- MySQL ya operativo
+
+### Paso 1. Entrar al VPS e instalar paquetes base
+
+```bash
+sudo apt update
+sudo apt install -y python3 python3-venv python3-pip nginx git
 ```
 
-Pasos recomendados:
+Verifica versiones:
 
-1. Copia el proyecto al VPS
-2. Crea `.venv`
-3. Instala dependencias con `pip install -e .`
-4. Configura `.env`
-5. Lanza `uvicorn`
-6. Prueba `/api/v1/health` y `/api/v1/health/db`
+```bash
+python3 --version
+pip3 --version
+nginx -v
+```
+
+### Paso 2. Subir el proyecto al servidor
+
+Ejemplo usando `/var/www`:
+
+```bash
+cd /var/www
+sudo git clone <URL_DE_TU_REPO> eldojo-backend-api
+sudo chown -R $USER:$USER /var/www/eldojo-backend-api
+cd /var/www/eldojo-backend-api
+```
+
+Si ya existe en el VPS y solo quieres actualizarlo:
+
+```bash
+cd /var/www/eldojo-backend-api
+git pull origin main
+```
+
+### Paso 3. Crear el entorno virtual e instalar dependencias
+
+```bash
+cd /var/www/eldojo-backend-api
+python3 -m venv .venv
+source .venv/bin/activate
+pip install --upgrade pip
+pip install -e .
+pip install gunicorn
+```
+
+`gunicorn` se instala aparte porque sera el proceso que dejara la API viva de forma
+estable en produccion.
+
+### Paso 4. Crear y completar el archivo `.env`
+
+```bash
+cp .env.example .env
+nano .env
+```
+
+Ejemplo para produccion:
+
+```env
+APP_NAME=ElDojo Backend API
+APP_ENV=production
+APP_DEBUG=false
+API_V1_PREFIX=/api/v1
+DATABASE_URL=mysql+pymysql://USUARIO:CLAVE@127.0.0.1:3306/eldojo_db
+AUTH_SECRET_KEY=CAMBIA_ESTA_CLAVE_POR_UNA_LARGA_Y_PRIVADA
+AUTH_ALGORITHM=HS256
+AUTH_ISSUER=eldojo-backend-api
+AUTH_ACCESS_TOKEN_EXPIRE_MINUTES=120
+AUTH_REFRESH_TOKEN_EXPIRE_DAYS=30
+BACKEND_CORS_ORIGINS=https://app.tudominio.com,http://TU_IP_PUBLICA
+UPLOADS_DIR=/var/www/eldojo-backend-api/uploads
+UPLOADS_URL_PREFIX=/uploads
+```
+
+Puntos importantes:
+
+- como MySQL ya corre en este mismo VPS, normalmente `127.0.0.1` es la mejor opcion
+- `AUTH_SECRET_KEY` debe ser distinta al ejemplo y dificil de adivinar
+- `BACKEND_CORS_ORIGINS` debe incluir el dominio o IP del frontend
+- `UPLOADS_DIR` debe apuntar a una carpeta real con permisos de escritura
+
+### Paso 5. Crear la carpeta de uploads
+
+```bash
+mkdir -p /var/www/eldojo-backend-api/uploads
+chmod 775 /var/www/eldojo-backend-api/uploads
+```
+
+Este proyecto publica archivos desde `/uploads`, asi que conviene dejar esa carpeta
+lista desde el inicio.
+
+### Paso 6. Probar la API manualmente antes de automatizarla
+
+```bash
+cd /var/www/eldojo-backend-api
+source .venv/bin/activate
+gunicorn -k uvicorn.workers.UvicornWorker -w 3 -b 127.0.0.1:8000 app.main:app
+```
+
+En otra terminal o sesion SSH, valida:
+
+```bash
+curl http://127.0.0.1:8000/
+curl http://127.0.0.1:8000/api/v1/health
+curl http://127.0.0.1:8000/api/v1/health/db
+```
+
+Si responde bien, deten la prueba manual con `Ctrl + C` y sigue con el servicio
+permanente.
+
+### Paso 7. Crear el servicio `systemd`
+
+Crea el archivo:
+
+```bash
+sudo nano /etc/systemd/system/eldojo-api.service
+```
+
+Contenido sugerido:
+
+```ini
+[Unit]
+Description=ElDojo Backend API
+After=network.target
+
+[Service]
+User=www-data
+Group=www-data
+WorkingDirectory=/var/www/eldojo-backend-api
+Environment="PATH=/var/www/eldojo-backend-api/.venv/bin"
+ExecStart=/var/www/eldojo-backend-api/.venv/bin/gunicorn -k uvicorn.workers.UvicornWorker -w 3 -b 127.0.0.1:8000 app.main:app
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Como el servicio correra con `www-data`, deja permisos correctos:
+
+```bash
+sudo chown -R www-data:www-data /var/www/eldojo-backend-api
+sudo systemctl daemon-reload
+sudo systemctl enable eldojo-api
+sudo systemctl start eldojo-api
+sudo systemctl status eldojo-api
+```
+
+Para ver logs:
+
+```bash
+sudo journalctl -u eldojo-api -f
+```
+
+### Paso 8. Publicar la API con `nginx`
+
+Crea el archivo:
+
+```bash
+sudo nano /etc/nginx/sites-available/eldojo-api
+```
+
+Contenido sugerido:
+
+```nginx
+server {
+    listen 80;
+    server_name api.tudominio.com;
+
+    client_max_body_size 20M;
+
+    location / {
+        proxy_pass http://127.0.0.1:8000;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+```
+
+Activa el sitio y recarga `nginx`:
+
+```bash
+sudo ln -s /etc/nginx/sites-available/eldojo-api /etc/nginx/sites-enabled/eldojo-api
+sudo nginx -t
+sudo systemctl reload nginx
+```
+
+### Paso 9. Activar HTTPS
+
+Si el dominio ya apunta al VPS:
+
+```bash
+sudo apt install -y certbot python3-certbot-nginx
+sudo certbot --nginx -d api.tudominio.com
+```
+
+### Paso 10. Validar el despliegue completo
+
+Pruebas recomendadas:
+
+```bash
+curl https://api.tudominio.com/
+curl https://api.tudominio.com/api/v1/health
+curl https://api.tudominio.com/api/v1/health/db
+```
+
+Abre tambien:
+
+```text
+https://api.tudominio.com/docs
+```
+
+Si el frontend vive en otro dominio, prueba un login real desde la UI para confirmar:
+
+- conexion a la base de datos
+- CORS correcto
+- generacion de tokens
+- acceso a `/uploads` si se usan imagenes
+
+### Paso 11. Actualizar la API en futuras versiones
+
+```bash
+cd /var/www/eldojo-backend-api
+git pull origin main
+source .venv/bin/activate
+pip install -e .
+pip install gunicorn
+sudo systemctl restart eldojo-api
+sudo systemctl status eldojo-api
+```
+
+### Lista corta de diagnostico si algo falla
+
+1. revisa `sudo systemctl status eldojo-api`
+2. revisa `sudo journalctl -u eldojo-api -f`
+3. confirma que `.env` tiene el `DATABASE_URL` correcto
+4. prueba `curl http://127.0.0.1:8000/api/v1/health/db`
+5. confirma que `BACKEND_CORS_ORIGINS` incluye el dominio real del frontend
+6. verifica que `nginx` este bien con `sudo nginx -t`
 
 ## Siguiente evolución sugerida
 

@@ -38,6 +38,18 @@ app/
 - MySQL 8 corriendo
 - Base de datos `eldojo_db` ya creada y migrada desde el proyecto de DB
 
+## Cambio manual reciente
+
+Para soportar `first_name` y `last_name` en usuarios administrativos, aplica antes este SQL:
+
+```sql
+ALTER TABLE users
+    ADD COLUMN first_name VARCHAR(100) NULL AFTER id,
+    ADD COLUMN last_name VARCHAR(100) NULL AFTER first_name;
+```
+
+También queda disponible el archivo `manual_migration_20260720_add_user_names.sql` en la raíz del proyecto.
+
 ## Instalación local
 
 ```bash
@@ -107,6 +119,7 @@ uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 - `GET /api/v1/health/db`
 - `POST /api/v1/auth/login`
 - `POST /api/v1/auth/refresh`
+- `POST /api/v1/auth/academy/register`
 - `POST /api/v1/auth/student/register`
 - `GET /api/v1/auth/me`
 - `GET /api/v1/me`
@@ -169,6 +182,7 @@ abiertos son:
 - `GET /api/v1/health/db`
 - `POST /api/v1/auth/login`
 - `POST /api/v1/auth/refresh`
+- `POST /api/v1/auth/academy/register`
 - `POST /api/v1/auth/student/register`
 
 Si usaste el seed de la base de datos, puedes iniciar sesión con:
@@ -186,6 +200,20 @@ Ejemplo de `POST /api/v1/auth/login`:
   "password": "d4nt3r4d"
 }
 ```
+
+Ejemplo de `POST /api/v1/auth/academy/register`:
+
+```json
+{
+  "academy_name": "Union MMA",
+  "admin_first_name": "Dante",
+  "admin_last_name": "Ramirez",
+  "email": "admin.union@example.com",
+  "password": "d4nt3r4d123"
+}
+```
+
+Para probar rápido desde VS Code o clientes compatibles, usa el archivo `academy-register.http`.
 
 La respuesta ahora trae:
 
