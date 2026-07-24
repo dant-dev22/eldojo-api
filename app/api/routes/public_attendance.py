@@ -1,16 +1,14 @@
-"""Endpoints públicos para captura web de asistencias."""
+"""Endpoints públicos para captura web manual de asistencias."""
 
 from __future__ import annotations
 
 import re
 import unicodedata
 from datetime import datetime, timezone
-from hmac import compare_digest
-from urllib.parse import parse_qs, urlparse
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from app.db.session import get_db
 from app.models.enums import AttendanceMethod, StudentStatus
@@ -20,6 +18,7 @@ from app.models.teaching import Attendance, MartialClass
 from app.schemas.public_attendance import (
     PublicAttendanceContext,
     PublicAttendanceCreate,
+    PublicAttendanceStudentPreview,
     PublicAttendanceResult,
 )
 
@@ -62,36 +61,10 @@ def resolve_public_scope(db: Session, organization_slug: str, branch_slug: str) 
     return organization, branch
 
 
-def extract_qr_secret(raw_value: str) -> str:
-    """Extrae el token útil desde un QR plano o una URL."""
-
-    candidate = raw_value.strip()
-    if not candidate:
-        return ""
-
-    parsed = urlparse(candidate)
-    if parsed.scheme and parsed.netloc:
-        query = parse_qs(parsed.query)
-        for key in ("token", "qr", "secret"):
-            values = query.get(key)
-            if values and values[0].strip():
-                return values[0].strip()
-        tail = parsed.path.rstrip("/").split("/")[-1]
-        if tail:
-            return tail.strip()
-
-    if ":" in candidate:
-        prefix, value = candidate.split(":", 1)
-        if prefix.lower() in {"qr", "token", "secret"} and value.strip():
-            return value.strip()
-
-    return candidate
-
-
-def resolve_student_for_public_check_in(db: Session, branch: Branch, student_code: str) -> Student:
+def resolve_student_for_public_identifier(db: Session, branch: Branch, student_identifier: str) -> Student:
     """Busca un alumno activo de la sucursal por código público o id."""
 
-    normalized_code = student_code.strip().upper()
+    normalized_code = student_identifier.strip().upper()
     student = db.scalar(
         select(Student).where(
             Student.branch_id == branch.id,
@@ -116,6 +89,44 @@ def resolve_student_for_public_check_in(db: Session, branch: Branch, student_cod
     return student
 
 
+def resolve_student_for_public_id(db: Session, branch: Branch, student_id: int) -> Student:
+    """Busca un alumno activo de la sucursal por id interno."""
+
+    student = db.scalar(
+        select(Student).where(
+            Student.id == student_id,
+            Student.branch_id == branch.id,
+            Student.deleted_at.is_(None),
+        )
+    )
+    if student is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Alumno no encontrado en esta sucursal")
+    if student.status != StudentStatus.ACTIVE:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="El alumno no está activo")
+    return student
+
+
+@router.get("/{organization_slug}/{branch_slug}/students/lookup", response_model=PublicAttendanceStudentPreview)
+def lookup_public_student(
+    organization_slug: str,
+    branch_slug: str,
+    query: str,
+    db: Session = Depends(get_db),
+) -> PublicAttendanceStudentPreview:
+    """Busca un alumno activo por id o código dentro de la sucursal pública."""
+
+    _, branch = resolve_public_scope(db, organization_slug, branch_slug)
+    student = resolve_student_for_public_identifier(db, branch, query)
+    student_name = f"{student.first_name} {student.last_name}".strip()
+    return PublicAttendanceStudentPreview(
+        id=student.id,
+        unique_code=student.unique_code,
+        first_name=student.first_name,
+        last_name=student.last_name,
+        student_name=student_name,
+    )
+
+
 @router.get("/{organization_slug}/{branch_slug}", response_model=PublicAttendanceContext)
 def get_public_attendance_context(
     organization_slug: str,
@@ -128,6 +139,7 @@ def get_public_attendance_context(
     classes = list(
         db.scalars(
             select(MartialClass)
+            .options(selectinload(MartialClass.schedules))
             .where(
                 MartialClass.organization_id == organization.id,
                 MartialClass.branch_id == branch.id,
@@ -143,6 +155,7 @@ def get_public_attendance_context(
         branch_name=branch.name,
         branch_slug=slugify_text(branch.name),
         branch_id=branch.id,
+        branch_timezone=branch.timezone,
         classes=classes,
     )
 
@@ -154,17 +167,13 @@ def create_public_attendance(
     payload: PublicAttendanceCreate,
     db: Session = Depends(get_db),
 ) -> PublicAttendanceResult:
-    """Registra una asistencia desde una interfaz pública validada con QR."""
+    """Registra una asistencia desde una interfaz pública manual."""
 
     organization, branch = resolve_public_scope(db, organization_slug, branch_slug)
-    student = resolve_student_for_public_check_in(db, branch, payload.student_code)
+    student = resolve_student_for_public_id(db, branch, payload.student_id)
 
     if student.organization_id != organization.id:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="El alumno no pertenece al equipo")
-
-    qr_secret = extract_qr_secret(payload.qr_token)
-    if not qr_secret or not compare_digest(qr_secret, branch.qr_secret):
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="El QR escaneado no corresponde a esta sucursal")
 
     class_obj: MartialClass | None = None
     if payload.class_id is not None:
@@ -182,7 +191,7 @@ def create_public_attendance(
         class_id=payload.class_id,
         branch_id=branch.id,
         check_in_at=datetime.now(timezone.utc).replace(tzinfo=None),
-        method=AttendanceMethod.QR,
+        method=AttendanceMethod.MANUAL,
         registered_by=None,
     )
     db.add(attendance)

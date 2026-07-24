@@ -52,7 +52,7 @@ class Settings:
         default_factory=lambda: as_list(
             os.getenv(
                 "BACKEND_CORS_ORIGINS",
-                "http://localhost:8081,http://127.0.0.1:8081,http://localhost:19006,http://127.0.0.1:19006,http://76.13.126.149,http://localhost:3000",
+                "http://localhost:8081,http://127.0.0.1:8081,http://localhost:19006,http://127.0.0.1:19006,http://localhost:3000,http://127.0.0.1:3000",
             )
         )
     ) 

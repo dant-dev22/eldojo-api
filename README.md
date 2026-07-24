@@ -675,11 +675,7 @@ python3 -m venv .venv
 source .venv/bin/activate
 pip install --upgrade pip
 pip install -e .
-pip install gunicorn
 ```
-
-`gunicorn` se instala aparte porque sera el proceso que dejara la API viva de forma
-estable en produccion.
 
 ### Paso 4. Crear y completar el archivo `.env`
 
@@ -728,7 +724,7 @@ lista desde el inicio.
 ```bash
 cd /var/www/eldojo-backend-api
 source .venv/bin/activate
-gunicorn -k uvicorn.workers.UvicornWorker -w 3 -b 127.0.0.1:8000 app.main:app
+gunicorn -c gunicorn.conf.py app.main:app
 ```
 
 En otra terminal o sesion SSH, valida:
@@ -744,30 +740,10 @@ permanente.
 
 ### Paso 7. Crear el servicio `systemd`
 
-Crea el archivo:
+Copia la plantilla versionada:
 
 ```bash
-sudo nano /etc/systemd/system/eldojo-api.service
-```
-
-Contenido sugerido:
-
-```ini
-[Unit]
-Description=ElDojo Backend API
-After=network.target
-
-[Service]
-User=www-data
-Group=www-data
-WorkingDirectory=/var/www/eldojo-backend-api
-Environment="PATH=/var/www/eldojo-backend-api/.venv/bin"
-ExecStart=/var/www/eldojo-backend-api/.venv/bin/gunicorn -k uvicorn.workers.UvicornWorker -w 3 -b 127.0.0.1:8000 app.main:app
-Restart=always
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
+sudo cp /var/www/eldojo-backend-api/deploy/systemd/eldojo-api.service /etc/systemd/system/eldojo-api.service
 ```
 
 Como el servicio correra con `www-data`, deja permisos correctos:
@@ -788,30 +764,10 @@ sudo journalctl -u eldojo-api -f
 
 ### Paso 8. Publicar la API con `nginx`
 
-Crea el archivo:
+Copia la plantilla versionada:
 
 ```bash
-sudo nano /etc/nginx/sites-available/eldojo-api
-```
-
-Contenido sugerido:
-
-```nginx
-server {
-    listen 80;
-    server_name api.tudominio.com;
-
-    client_max_body_size 20M;
-
-    location / {
-        proxy_pass http://127.0.0.1:8000;
-        proxy_http_version 1.1;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-    }
-}
+sudo cp /var/www/eldojo-backend-api/deploy/nginx/eldojo-api.conf /etc/nginx/sites-available/eldojo-api
 ```
 
 Activa el sitio y recarga `nginx`:
