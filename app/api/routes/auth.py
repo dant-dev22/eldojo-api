@@ -30,6 +30,7 @@ from app.schemas.auth import (
     RefreshRequest,
     StudentRegisterRequest,
     TokenResponse,
+    TutorialStateUpdateRequest,
 )
 from app.schemas.user import UserRead
 
@@ -214,6 +215,7 @@ def register_academy(payload: AcademyRegisterRequest, db: Session = Depends(get_
         password_hash=hash_password(payload.password),
         role=UserRole.ORG_ADMIN,
         is_active=True,
+        first_time=True,
         last_login_at=datetime.now(timezone.utc).replace(tzinfo=None),
     )
 
@@ -289,6 +291,7 @@ def register_student(payload: StudentRegisterRequest, db: Session = Depends(get_
         password_hash=hash_password(payload.password),
         role=UserRole.STUDENT,
         is_active=True,
+        first_time=True,
     )
     db.add(user)
 
@@ -309,4 +312,18 @@ def register_student(payload: StudentRegisterRequest, db: Session = Depends(get_
 def read_current_user(current_user: User = Depends(require_active_user)) -> User:
     """Devuelve el usuario autenticado por el Bearer token."""
 
+    return current_user
+
+
+@router.patch("/me/tutorial-state", response_model=UserRead)
+def update_tutorial_state(
+    payload: TutorialStateUpdateRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_active_user),
+) -> User:
+    """Actualiza la bandera del tutorial inicial del usuario autenticado."""
+
+    current_user.first_time = payload.first_time
+    db.commit()
+    db.refresh(current_user)
     return current_user

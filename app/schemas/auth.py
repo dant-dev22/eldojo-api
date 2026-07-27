@@ -73,6 +73,12 @@ class AcademyRegisterRequest(BaseModel):
         return value.strip().lower()
 
 
+class TutorialStateUpdateRequest(BaseModel):
+    """Payload para actualizar el estado del tutorial inicial."""
+
+    first_time: bool
+
+
 class TokenResponse(BaseModel):
     """Respuesta de autenticación exitosa."""
 
