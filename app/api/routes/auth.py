@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import re
 import unicodedata
 
@@ -12,20 +12,32 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
 from app.api.dependencies import require_active_user
+from app.core.config import settings
+from app.core.mail import (
+    MailDeliveryError,
+    build_academy_confirmation_url,
+    send_academy_confirmation_email,
+)
 from app.core.security import (
     create_access_token,
     create_refresh_token,
     decode_refresh_token,
+    generate_email_verification_token,
+    hash_email_verification_token,
     hash_password,
     verify_password,
 )
 from app.db.session import get_db
+from app.models.email_verification import EmailVerificationToken
 from app.models.organization import Organization
 from app.models.enums import UserRole
 from app.models.student import Student
 from app.models.user import AdminAssignment, User
 from app.schemas.auth import (
+    AcademyConfirmRequest,
     AcademyRegisterRequest,
+    AcademyRegisterPendingResponse,
+    AcademyResendConfirmationRequest,
     LoginRequest,
     RefreshRequest,
     StudentRegisterRequest,
@@ -36,6 +48,12 @@ from app.schemas.user import UserRead
 
 
 router = APIRouter(prefix="/auth", tags=["auth"])
+
+
+def utc_now() -> datetime:
+    """Devuelve la fecha UTC naive usada por la base actual."""
+
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
 def get_user_by_email(db: Session, email: str) -> User | None:
@@ -69,6 +87,79 @@ def build_token_response(user: User) -> TokenResponse:
         refresh_expires_in=refresh_expires_in,
         user=UserRead.model_validate(user),
     )
+
+
+def build_pending_confirmation_response(*, email: str, email_sent: bool) -> AcademyRegisterPendingResponse:
+    """Construye la respuesta estándar para cuentas pendientes de confirmación."""
+
+    if email_sent:
+        message = "Te enviamos un enlace de confirmación para activar tu cuenta."
+    else:
+        message = (
+            "Tu registro quedó pendiente, pero no pudimos enviar el correo. "
+            "Solicita un reenvío desde la pantalla de acceso."
+        )
+
+    return AcademyRegisterPendingResponse(
+        email=email,
+        email_sent=email_sent,
+        message=message,
+        verification_expires_in_hours=settings.academy_verification_token_expire_hours,
+    )
+
+
+def is_pending_confirmation_user(user: User) -> bool:
+    """Indica si el usuario quedó pendiente de confirmar su correo."""
+
+    return user.email_verified_at is None and not user.is_active
+
+
+def invalidate_verification_tokens(db: Session, user_id: int, *, used_at: datetime | None = None) -> None:
+    """Marca como usados todos los tokens pendientes del usuario."""
+
+    timestamp = used_at or utc_now()
+    pending_tokens = db.scalars(
+        select(EmailVerificationToken)
+        .where(EmailVerificationToken.user_id == user_id)
+        .where(EmailVerificationToken.used_at.is_(None))
+    ).all()
+
+    for token in pending_tokens:
+        token.used_at = timestamp
+
+
+def issue_verification_token(db: Session, user: User) -> str:
+    """Genera y persiste un nuevo token de confirmación para el usuario."""
+
+    invalidate_verification_tokens(db, user.id)
+    raw_token = generate_email_verification_token()
+    db.add(
+        EmailVerificationToken(
+            user_id=user.id,
+            token_hash=hash_email_verification_token(raw_token),
+            expires_at=utc_now() + timedelta(hours=settings.academy_verification_token_expire_hours),
+        )
+    )
+    return raw_token
+
+
+def deliver_confirmation_email(user: User, raw_token: str) -> bool:
+    """Intenta enviar el correo de confirmación sin exponer errores SMTP al cliente."""
+
+    recipient_name = " ".join(
+        part for part in [user.first_name or "", user.last_name or ""] if part
+    ).strip() or "equipo"
+
+    try:
+        send_academy_confirmation_email(
+            recipient_email=user.email,
+            recipient_name=recipient_name,
+            confirmation_url=build_academy_confirmation_url(raw_token),
+        )
+    except MailDeliveryError:
+        return False
+
+    return True
 
 
 def normalize_academy_name(value: str) -> str:
@@ -181,32 +272,48 @@ def login(payload: LoginRequest, db: Session = Depends(get_db)) -> TokenResponse
         )
 
     if not user.is_active:
+        if user.email_verified_at is None:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Tu cuenta aun no ha sido confirmada. Revisa tu correo o solicita un nuevo enlace.",
+            )
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="El usuario está inactivo",
         )
 
-    user.last_login_at = datetime.now(timezone.utc).replace(tzinfo=None)
+    user.last_login_at = utc_now()
     db.commit()
     db.refresh(user)
     return build_token_response(user)
 
 
-@router.post("/academy/register", response_model=TokenResponse, status_code=status.HTTP_201_CREATED)
-def register_academy(payload: AcademyRegisterRequest, db: Session = Depends(get_db)) -> TokenResponse:
-    """Crea una academia con su administrador inicial y devuelve sesión autenticada."""
+@router.post(
+    "/academy/register",
+    response_model=AcademyRegisterPendingResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def register_academy(
+    payload: AcademyRegisterRequest,
+    db: Session = Depends(get_db),
+) -> AcademyRegisterPendingResponse:
+    """Crea una academia pendiente y envía un enlace de confirmación al admin inicial."""
 
     normalized_academy_name = normalize_academy_name(payload.academy_name)
     if organization_exists_by_name(db, normalized_academy_name):
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Esa academia ya existe")
 
-    if get_user_by_email(db, payload.email) is not None:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Ese usuario ya existe")
+    existing_user = get_user_by_email(db, payload.email)
+    if existing_user is not None:
+        detail = "Ese usuario ya existe"
+        if is_pending_confirmation_user(existing_user):
+            detail = "Ya existe un registro pendiente con ese correo. Revisa tu correo o solicita un reenvío."
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=detail)
 
     organization = Organization(
         name=normalized_academy_name,
         slug=resolve_available_organization_slug(db, normalized_academy_name),
-        is_active=True,
+        is_active=False,
     )
     user = User(
         first_name=payload.admin_first_name,
@@ -214,12 +321,14 @@ def register_academy(payload: AcademyRegisterRequest, db: Session = Depends(get_
         email=payload.email,
         password_hash=hash_password(payload.password),
         role=UserRole.ORG_ADMIN,
-        is_active=True,
+        is_active=False,
+        email_verified_at=None,
         first_time=True,
-        last_login_at=datetime.now(timezone.utc).replace(tzinfo=None),
+        last_login_at=None,
     )
 
     db.add(organization)
+    raw_token = ""
 
     try:
         db.flush()
@@ -230,19 +339,17 @@ def register_academy(payload: AcademyRegisterRequest, db: Session = Depends(get_
             )
         )
         db.add(user)
+        db.flush()
+        raw_token = issue_verification_token(db, user)
         db.commit()
     except IntegrityError as exc:
         db.rollback()
         raise build_duplicate_error(exc, "No fue posible crear la academia") from exc
 
-    created_user = get_user_by_email(db, payload.email)
-    if created_user is None:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="La academia se creó pero no fue posible recuperar la sesión inicial",
-        )
-
-    return build_token_response(created_user)
+    return build_pending_confirmation_response(
+        email=payload.email,
+        email_sent=deliver_confirmation_email(user, raw_token),
+    )
 
 
 @router.post("/refresh", response_model=TokenResponse)
@@ -298,7 +405,8 @@ def register_student(payload: StudentRegisterRequest, db: Session = Depends(get_
     try:
         db.flush()
         student.user_id = user.id
-        user.last_login_at = datetime.now(timezone.utc).replace(tzinfo=None)
+        user.email_verified_at = utc_now()
+        user.last_login_at = utc_now()
         db.commit()
     except IntegrityError as exc:
         db.rollback()
@@ -306,6 +414,86 @@ def register_student(payload: StudentRegisterRequest, db: Session = Depends(get_
 
     db.refresh(user)
     return build_token_response(user)
+
+
+@router.post("/academy/confirm", response_model=TokenResponse)
+def confirm_academy_registration(
+    payload: AcademyConfirmRequest,
+    db: Session = Depends(get_db),
+) -> TokenResponse:
+    """Activa una cuenta de academia usando un token de confirmación válido."""
+
+    verification_token = db.scalar(
+        select(EmailVerificationToken).where(
+            EmailVerificationToken.token_hash == hash_email_verification_token(payload.token)
+        )
+    )
+    if verification_token is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="El enlace de confirmación es inválido",
+        )
+
+    if verification_token.used_at is not None:
+        raise HTTPException(
+            status_code=status.HTTP_410_GONE,
+            detail="Este enlace de confirmación ya fue utilizado",
+        )
+
+    now = utc_now()
+    if verification_token.expires_at <= now:
+        raise HTTPException(
+            status_code=status.HTTP_410_GONE,
+            detail="El enlace de confirmación ha expirado",
+        )
+
+    user = db.get(User, verification_token.user_id)
+    if user is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="La cuenta asociada ya no existe",
+        )
+
+    user.is_active = True
+    user.email_verified_at = now
+    user.last_login_at = now
+    verification_token.used_at = now
+    invalidate_verification_tokens(db, user.id, used_at=now)
+
+    organizations = db.scalars(
+        select(Organization)
+        .join(AdminAssignment, AdminAssignment.organization_id == Organization.id)
+        .where(AdminAssignment.user_id == user.id)
+    ).all()
+    for organization in organizations:
+        organization.is_active = True
+
+    db.commit()
+    db.refresh(user)
+    return build_token_response(user)
+
+
+@router.post("/academy/resend-confirmation", response_model=AcademyRegisterPendingResponse)
+def resend_academy_confirmation(
+    payload: AcademyResendConfirmationRequest,
+    db: Session = Depends(get_db),
+) -> AcademyRegisterPendingResponse:
+    """Reenvía el correo de confirmación para una cuenta pendiente."""
+
+    user = get_user_by_email(db, payload.email)
+    if user is None or user.role != UserRole.ORG_ADMIN or not is_pending_confirmation_user(user):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No existe una cuenta pendiente con ese correo",
+        )
+
+    raw_token = issue_verification_token(db, user)
+    db.commit()
+
+    return build_pending_confirmation_response(
+        email=user.email,
+        email_sent=deliver_confirmation_email(user, raw_token),
+    )
 
 
 @router.get("/me", response_model=UserRead)

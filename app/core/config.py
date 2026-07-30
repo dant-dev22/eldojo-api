@@ -48,6 +48,19 @@ class Settings:
     auth_issuer: str = os.getenv("AUTH_ISSUER", "eldojo-backend-api")
     auth_access_token_expire_minutes: int = int(os.getenv("AUTH_ACCESS_TOKEN_EXPIRE_MINUTES", "120"))
     auth_refresh_token_expire_days: int = int(os.getenv("AUTH_REFRESH_TOKEN_EXPIRE_DAYS", "30"))
+    academy_verification_token_expire_hours: int = int(
+        os.getenv("ACADEMY_VERIFICATION_TOKEN_EXPIRE_HOURS", "24")
+    )
+    academy_verification_url_base: str = os.getenv(
+        "ACADEMY_VERIFICATION_URL_BASE",
+        "http://localhost:8081/confirmar-cuenta",
+    )
+    smtp_host: str | None = os.getenv("SMTP_HOST")
+    smtp_port: int = int(os.getenv("SMTP_PORT", "465"))
+    smtp_username: str | None = os.getenv("SMTP_USERNAME")
+    smtp_password: str | None = os.getenv("SMTP_PASSWORD")
+    smtp_from_email: str | None = os.getenv("SMTP_FROM_EMAIL")
+    smtp_from_name: str = os.getenv("SMTP_FROM_NAME", "ElDojo")
     backend_cors_origins: list[str] = field(
         default_factory=lambda: as_list(
             os.getenv(

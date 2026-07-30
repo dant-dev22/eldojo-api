@@ -21,3 +21,6 @@ env/
 .idea/
 .DS_Store
 Thumbs.db
+
+# Scripts locales
+run-local-api.sh

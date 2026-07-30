@@ -6,6 +6,7 @@ import base64
 import hashlib
 import hmac
 import json
+import secrets
 import time
 
 from app.core.config import settings
@@ -49,6 +50,18 @@ def verify_password(password: str, password_hash: str) -> bool:
     """Verifica una contraseña contra el hash almacenado."""
 
     return hmac.compare_digest(hash_password(password), password_hash)
+
+
+def generate_email_verification_token() -> str:
+    """Genera un token aleatorio URL-safe para confirmar cuentas por correo."""
+
+    return secrets.token_urlsafe(32)
+
+
+def hash_email_verification_token(token: str) -> str:
+    """Hashea el token de verificación para no almacenarlo en texto plano."""
+
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
 def _create_token(*, user_id: int, email: str, role: str, token_type: str, ttl_seconds: int) -> tuple[str, int]:

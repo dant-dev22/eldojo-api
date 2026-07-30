@@ -73,6 +73,35 @@ class AcademyRegisterRequest(BaseModel):
         return value.strip().lower()
 
 
+class AcademyRegisterPendingResponse(BaseModel):
+    """Respuesta cuando una academia queda pendiente de confirmar correo."""
+
+    status: str = "pending_confirmation"
+    email: str
+    email_sent: bool
+    message: str
+    verification_expires_in_hours: int
+
+
+class AcademyConfirmRequest(BaseModel):
+    """Payload para confirmar una cuenta de academia con un token."""
+
+    token: str = Field(min_length=16, max_length=512)
+
+
+class AcademyResendConfirmationRequest(BaseModel):
+    """Payload para reenviar el correo de confirmación."""
+
+    email: str = Field(min_length=5, max_length=255)
+
+    @field_validator("email")
+    @classmethod
+    def normalize_resend_email(cls, value: str) -> str:
+        """Normaliza el email para reenviar confirmaciones."""
+
+        return value.strip().lower()
+
+
 class TutorialStateUpdateRequest(BaseModel):
     """Payload para actualizar el estado del tutorial inicial."""
 
