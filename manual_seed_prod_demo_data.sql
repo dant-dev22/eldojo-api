@@ -5,6 +5,7 @@
 --   dantedev22@gmail.com
 --
 -- Before running in the VPS, review these variables if needed:
+SET NAMES utf8mb4 COLLATE utf8mb4_unicode_ci;
 SET @target_email := 'dantedev22@gmail.com';
 SET @seed_tag := 'seed_demo_prod_20260730';
 SET @student_count := 40;
@@ -15,8 +16,8 @@ DROP PROCEDURE IF EXISTS seed_prod_demo_data_for_account$$
 
 CREATE PROCEDURE seed_prod_demo_data_for_account()
 BEGIN
-    DECLARE v_target_email VARCHAR(255);
-    DECLARE v_seed_tag VARCHAR(64);
+    DECLARE v_target_email VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+    DECLARE v_seed_tag VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
     DECLARE v_student_count INT;
 
     DECLARE v_user_id INT;
@@ -35,23 +36,23 @@ BEGIN
     DECLARE v_j INT DEFAULT 1;
     DECLARE v_attendance_count INT DEFAULT 0;
 
-    DECLARE v_first_name VARCHAR(100);
-    DECLARE v_last_name VARCHAR(100);
+    DECLARE v_first_name VARCHAR(100) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+    DECLARE v_last_name VARCHAR(100) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
     DECLARE v_birth_date DATE;
     DECLARE v_enrollment_date DATE;
     DECLARE v_monthly_fee DECIMAL(10, 2);
     DECLARE v_next_payment_date DATE;
-    DECLARE v_student_payment_status VARCHAR(20);
-    DECLARE v_student_status VARCHAR(20);
-    DECLARE v_unique_code VARCHAR(8);
-    DECLARE v_guardian_name VARCHAR(150);
-    DECLARE v_guardian_phone VARCHAR(50);
+    DECLARE v_student_payment_status VARCHAR(20) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+    DECLARE v_student_status VARCHAR(20) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+    DECLARE v_unique_code VARCHAR(8) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+    DECLARE v_guardian_name VARCHAR(150) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+    DECLARE v_guardian_phone VARCHAR(50) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 
     DECLARE v_period_start DATE;
     DECLARE v_period_end DATE;
     DECLARE v_previous_period_start DATE;
     DECLARE v_previous_period_end DATE;
-    DECLARE v_payment_method VARCHAR(20);
+    DECLARE v_payment_method VARCHAR(20) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 
     DECLARE EXIT HANDLER FOR SQLEXCEPTION
     BEGIN
