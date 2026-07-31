@@ -81,6 +81,9 @@ class AcademyRegisterPendingResponse(BaseModel):
     email_sent: bool
     message: str
     verification_expires_in_hours: int
+    pending_session_ticket: str
+    pending_session_expires_in_hours: int
+    polling_interval_seconds: int
 
 
 class AcademyConfirmRequest(BaseModel):
@@ -100,6 +103,19 @@ class AcademyResendConfirmationRequest(BaseModel):
         """Normaliza el email para reenviar confirmaciones."""
 
         return value.strip().lower()
+
+
+class AcademyPendingSessionRequest(BaseModel):
+    """Payload para consultar o canjear un ticket temporal de login."""
+
+    ticket: str = Field(min_length=16, max_length=512)
+
+
+class AcademyPendingSessionStatusResponse(BaseModel):
+    """Estado del ticket temporal asociado al registro pendiente."""
+
+    status: str
+    message: str
 
 
 class TutorialStateUpdateRequest(BaseModel):

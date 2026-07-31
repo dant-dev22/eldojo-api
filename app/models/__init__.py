@@ -1,5 +1,6 @@
 """Modelos ORM mínimos que el backend usa para operar sobre la DB existente."""
 
+from app.models.academy_pending_session import AcademyPendingSession
 from app.models.curriculum import Discipline
 from app.models.email_verification import EmailVerificationToken
 from app.models.finance import Payment
@@ -9,6 +10,7 @@ from app.models.teaching import Attendance, ClassEnrollment, ClassSchedule, Mart
 from app.models.user import AdminAssignment, User
 
 __all__ = [
+    "AcademyPendingSession",
     "AdminAssignment",
     "Attendance",
     "Branch",

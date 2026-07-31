@@ -28,6 +28,7 @@ from app.core.security import (
     verify_password,
 )
 from app.db.session import get_db
+from app.models.academy_pending_session import AcademyPendingSession
 from app.models.email_verification import EmailVerificationToken
 from app.models.organization import Organization
 from app.models.enums import UserRole
@@ -35,6 +36,8 @@ from app.models.student import Student
 from app.models.user import AdminAssignment, User
 from app.schemas.auth import (
     AcademyConfirmRequest,
+    AcademyPendingSessionRequest,
+    AcademyPendingSessionStatusResponse,
     AcademyRegisterRequest,
     AcademyRegisterPendingResponse,
     AcademyResendConfirmationRequest,
@@ -48,6 +51,7 @@ from app.schemas.user import UserRead
 
 
 router = APIRouter(prefix="/auth", tags=["auth"])
+PENDING_SESSION_POLLING_INTERVAL_SECONDS = 3
 
 
 def utc_now() -> datetime:
@@ -89,7 +93,12 @@ def build_token_response(user: User) -> TokenResponse:
     )
 
 
-def build_pending_confirmation_response(*, email: str, email_sent: bool) -> AcademyRegisterPendingResponse:
+def build_pending_confirmation_response(
+    *,
+    email: str,
+    email_sent: bool,
+    pending_session_ticket: str,
+) -> AcademyRegisterPendingResponse:
     """Construye la respuesta estándar para cuentas pendientes de confirmación."""
 
     if email_sent:
@@ -105,6 +114,9 @@ def build_pending_confirmation_response(*, email: str, email_sent: bool) -> Acad
         email_sent=email_sent,
         message=message,
         verification_expires_in_hours=settings.academy_verification_token_expire_hours,
+        pending_session_ticket=pending_session_ticket,
+        pending_session_expires_in_hours=settings.academy_pending_session_expire_hours,
+        polling_interval_seconds=PENDING_SESSION_POLLING_INTERVAL_SECONDS,
     )
 
 
@@ -128,6 +140,36 @@ def invalidate_verification_tokens(db: Session, user_id: int, *, used_at: dateti
         token.used_at = timestamp
 
 
+def invalidate_pending_session_tickets(db: Session, user_id: int, *, used_at: datetime | None = None) -> None:
+    """Marca como usados todos los tickets de autologin pendientes del usuario."""
+
+    timestamp = used_at or utc_now()
+    pending_tickets = db.scalars(
+        select(AcademyPendingSession)
+        .where(AcademyPendingSession.user_id == user_id)
+        .where(AcademyPendingSession.used_at.is_(None))
+    ).all()
+
+    for ticket in pending_tickets:
+        ticket.used_at = timestamp
+
+
+def activate_pending_session_tickets(db: Session, user_id: int, *, activated_at: datetime | None = None) -> None:
+    """Habilita los tickets vigentes del usuario una vez confirmado el correo."""
+
+    timestamp = activated_at or utc_now()
+    pending_tickets = db.scalars(
+        select(AcademyPendingSession)
+        .where(AcademyPendingSession.user_id == user_id)
+        .where(AcademyPendingSession.used_at.is_(None))
+        .where(AcademyPendingSession.activated_at.is_(None))
+    ).all()
+
+    for ticket in pending_tickets:
+        if ticket.expires_at > timestamp:
+            ticket.activated_at = timestamp
+
+
 def issue_verification_token(db: Session, user: User) -> str:
     """Genera y persiste un nuevo token de confirmación para el usuario."""
 
@@ -141,6 +183,31 @@ def issue_verification_token(db: Session, user: User) -> str:
         )
     )
     return raw_token
+
+
+def issue_pending_session_ticket(db: Session, user: User) -> str:
+    """Genera y persiste un ticket temporal para autologin web post confirmación."""
+
+    invalidate_pending_session_tickets(db, user.id)
+    raw_ticket = generate_email_verification_token()
+    db.add(
+        AcademyPendingSession(
+            user_id=user.id,
+            ticket_hash=hash_email_verification_token(raw_ticket),
+            expires_at=utc_now() + timedelta(hours=settings.academy_pending_session_expire_hours),
+        )
+    )
+    return raw_ticket
+
+
+def get_pending_session_by_ticket(db: Session, raw_ticket: str) -> AcademyPendingSession | None:
+    """Busca un ticket temporal a partir de su valor sin exponer el hash en cliente."""
+
+    return db.scalar(
+        select(AcademyPendingSession).where(
+            AcademyPendingSession.ticket_hash == hash_email_verification_token(raw_ticket)
+        )
+    )
 
 
 def deliver_confirmation_email(user: User, raw_token: str) -> bool:
@@ -329,6 +396,7 @@ def register_academy(
 
     db.add(organization)
     raw_token = ""
+    raw_pending_session_ticket = ""
 
     try:
         db.flush()
@@ -341,6 +409,7 @@ def register_academy(
         db.add(user)
         db.flush()
         raw_token = issue_verification_token(db, user)
+        raw_pending_session_ticket = issue_pending_session_ticket(db, user)
         db.commit()
     except IntegrityError as exc:
         db.rollback()
@@ -349,6 +418,7 @@ def register_academy(
     return build_pending_confirmation_response(
         email=payload.email,
         email_sent=deliver_confirmation_email(user, raw_token),
+        pending_session_ticket=raw_pending_session_ticket,
     )
 
 
@@ -459,6 +529,7 @@ def confirm_academy_registration(
     user.last_login_at = now
     verification_token.used_at = now
     invalidate_verification_tokens(db, user.id, used_at=now)
+    activate_pending_session_tickets(db, user.id, activated_at=now)
 
     organizations = db.scalars(
         select(Organization)
@@ -493,7 +564,95 @@ def resend_academy_confirmation(
     return build_pending_confirmation_response(
         email=user.email,
         email_sent=deliver_confirmation_email(user, raw_token),
+        pending_session_ticket="",
     )
+
+
+@router.post("/academy/pending-session/status", response_model=AcademyPendingSessionStatusResponse)
+def get_academy_pending_session_status(
+    payload: AcademyPendingSessionRequest,
+    db: Session = Depends(get_db),
+) -> AcademyPendingSessionStatusResponse:
+    """Expone el estado del ticket temporal que espera la confirmación por correo."""
+
+    pending_session = get_pending_session_by_ticket(db, payload.ticket)
+    if pending_session is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="La espera de confirmación ya no es válida para este navegador.",
+        )
+
+    now = utc_now()
+    if pending_session.used_at is not None:
+        return AcademyPendingSessionStatusResponse(
+            status="used",
+            message="La sesión pendiente ya fue consumida.",
+        )
+    if pending_session.expires_at <= now:
+        return AcademyPendingSessionStatusResponse(
+            status="expired",
+            message="La espera de confirmación expiró. Vuelve a iniciar el registro o entra manualmente.",
+        )
+    if pending_session.activated_at is None:
+        return AcademyPendingSessionStatusResponse(
+            status="pending_confirmation",
+            message="Seguimos esperando la confirmación del correo.",
+        )
+
+    return AcademyPendingSessionStatusResponse(
+        status="ready",
+        message="La cuenta ya fue confirmada. Puedes iniciar sesión automáticamente.",
+    )
+
+
+@router.post("/academy/pending-session/redeem", response_model=TokenResponse)
+def redeem_academy_pending_session(
+    payload: AcademyPendingSessionRequest,
+    db: Session = Depends(get_db),
+) -> TokenResponse:
+    """Canjea un ticket temporal listo para abrir la sesión en el navegador web."""
+
+    pending_session = get_pending_session_by_ticket(db, payload.ticket)
+    if pending_session is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="La espera de confirmación ya no es válida para este navegador.",
+        )
+
+    now = utc_now()
+    if pending_session.used_at is not None:
+        raise HTTPException(
+            status_code=status.HTTP_410_GONE,
+            detail="La sesión pendiente ya fue consumida.",
+        )
+    if pending_session.expires_at <= now:
+        raise HTTPException(
+            status_code=status.HTTP_410_GONE,
+            detail="La espera de confirmación expiró. Vuelve a iniciar el registro o entra manualmente.",
+        )
+    if pending_session.activated_at is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="La cuenta todavía no ha sido confirmada desde el correo.",
+        )
+
+    user = db.get(User, pending_session.user_id)
+    if user is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="La cuenta asociada ya no existe.",
+        )
+    if not user.is_active or user.email_verified_at is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="La cuenta todavía no está lista para iniciar sesión.",
+        )
+
+    user.last_login_at = now
+    pending_session.used_at = now
+    db.commit()
+    db.refresh(user)
+    return build_token_response(user)
 
 
 @router.get("/me", response_model=UserRead)

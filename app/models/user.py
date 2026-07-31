@@ -47,6 +47,11 @@ class User(Base):
         back_populates="user",
         cascade="all, delete-orphan",
     )
+    academy_pending_sessions = relationship(
+        "AcademyPendingSession",
+        back_populates="user",
+        cascade="all, delete-orphan",
+    )
     students = relationship("Student", back_populates="user")
     attendance_records = relationship("Attendance", back_populates="registered_by_user")
     payments_recorded = relationship("Payment", back_populates="recorded_by_user")

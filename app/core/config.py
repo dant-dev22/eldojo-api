@@ -51,6 +51,9 @@ class Settings:
     academy_verification_token_expire_hours: int = int(
         os.getenv("ACADEMY_VERIFICATION_TOKEN_EXPIRE_HOURS", "24")
     )
+    academy_pending_session_expire_hours: int = int(
+        os.getenv("ACADEMY_PENDING_SESSION_EXPIRE_HOURS", "24")
+    )
     academy_verification_url_base: str = os.getenv(
         "ACADEMY_VERIFICATION_URL_BASE",
         "http://localhost:8081/confirmar-cuenta",
