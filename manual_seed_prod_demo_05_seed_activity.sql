@@ -5,6 +5,7 @@ SET @seed_tag := 'seed_demo_prod_20260730';
 SET @user_id := NULL;
 SET @organization_id := NULL;
 SET @branch_id := NULL;
+SET @attendance_anchor_date := '2026-07-30';
 
 DROP TEMPORARY TABLE IF EXISTS tmp_seed_students;
 DROP TEMPORARY TABLE IF EXISTS tmp_seed_classes;
@@ -343,9 +344,9 @@ SELECT
     ss.student_id,
     ss.primary_class_id,
     @branch_id,
-    DATE_ADD(
-        DATE_SUB(UTC_TIMESTAMP(), INTERVAL MOD(ss.n + (num.seq * 3), 28) DAY),
-        INTERVAL (17 + MOD(ss.n, 4)) HOUR
+    TIMESTAMP(
+        DATE_SUB(@attendance_anchor_date, INTERVAL MOD(ss.n + (num.seq * 3), 28) DAY),
+        MAKETIME(17 + MOD(ss.n, 4), MOD(ss.n * 7, 60), 0)
     ) AS check_in_at,
     CASE
         WHEN MOD(ss.n + num.seq, 3) = 0 THEN 'qr'
@@ -365,9 +366,9 @@ WHERE ss.primary_class_id IS NOT NULL
         FROM attendance a
        WHERE a.student_id = ss.student_id
          AND a.class_id = ss.primary_class_id
-         AND a.check_in_at = DATE_ADD(
-             DATE_SUB(UTC_TIMESTAMP(), INTERVAL MOD(ss.n + (num.seq * 3), 28) DAY),
-             INTERVAL (17 + MOD(ss.n, 4)) HOUR
+         AND a.check_in_at = TIMESTAMP(
+             DATE_SUB(@attendance_anchor_date, INTERVAL MOD(ss.n + (num.seq * 3), 28) DAY),
+             MAKETIME(17 + MOD(ss.n, 4), MOD(ss.n * 7, 60), 0)
          )
   );
 
