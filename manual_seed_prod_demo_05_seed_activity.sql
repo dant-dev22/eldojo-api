@@ -375,12 +375,23 @@ SELECT
     'activity_seeded' AS step,
     @organization_id AS organization_id,
     @branch_id AS branch_id,
-    (SELECT COUNT(*) FROM tmp_seed_students) AS seeded_students,
+    (
+        SELECT COUNT(*)
+          FROM students s
+         WHERE s.organization_id = @organization_id
+           AND s.branch_id = @branch_id
+           AND CONVERT(s.notes USING utf8mb4) COLLATE utf8mb4_unicode_ci
+               = CONVERT(@seed_tag USING utf8mb4) COLLATE utf8mb4_unicode_ci
+    ) AS seeded_students,
     (
         SELECT COUNT(*)
           FROM class_enrollments ce
-          JOIN tmp_seed_students ss
-            ON ss.student_id = ce.student_id
+          JOIN students s
+            ON s.id = ce.student_id
+         WHERE s.organization_id = @organization_id
+           AND s.branch_id = @branch_id
+           AND CONVERT(s.notes USING utf8mb4) COLLATE utf8mb4_unicode_ci
+               = CONVERT(@seed_tag USING utf8mb4) COLLATE utf8mb4_unicode_ci
     ) AS seeded_enrollments,
     (
         SELECT COUNT(*)
@@ -393,6 +404,10 @@ SELECT
     (
         SELECT COUNT(*)
           FROM attendance a
-          JOIN tmp_seed_students ss
-            ON ss.student_id = a.student_id
+          JOIN students s
+            ON s.id = a.student_id
+         WHERE s.organization_id = @organization_id
+           AND s.branch_id = @branch_id
+           AND CONVERT(s.notes USING utf8mb4) COLLATE utf8mb4_unicode_ci
+               = CONVERT(@seed_tag USING utf8mb4) COLLATE utf8mb4_unicode_ci
     ) AS seeded_attendance;
