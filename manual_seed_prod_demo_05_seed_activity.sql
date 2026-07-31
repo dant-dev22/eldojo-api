@@ -2,41 +2,48 @@ SET NAMES utf8mb4 COLLATE utf8mb4_unicode_ci;
 
 SET @target_email := 'dantedev22@gmail.com';
 SET @seed_tag := 'seed_demo_prod_20260730';
+SET @user_id := NULL;
+SET @organization_id := NULL;
+SET @branch_id := NULL;
 
-DROP TEMPORARY TABLE IF EXISTS tmp_seed_context;
 DROP TEMPORARY TABLE IF EXISTS tmp_seed_students;
 DROP TEMPORARY TABLE IF EXISTS tmp_seed_classes;
 DROP TEMPORARY TABLE IF EXISTS tmp_seed_numbers;
 
-CREATE TEMPORARY TABLE tmp_seed_context AS
-SELECT
-    u.id AS user_id,
-    aa.organization_id AS organization_id,
-    COALESCE(
-        (
-            SELECT aa2.branch_id
-              FROM admin_assignments aa2
-             WHERE aa2.user_id = u.id
-               AND aa2.organization_id = aa.organization_id
-               AND aa2.branch_id IS NOT NULL
-             ORDER BY aa2.created_at ASC, aa2.id ASC
-             LIMIT 1
-        ),
-        (
-            SELECT b.id
-              FROM branches b
-             WHERE b.organization_id = aa.organization_id
-             ORDER BY b.id ASC
-             LIMIT 1
-        )
-    ) AS branch_id
-FROM users u
-JOIN admin_assignments aa
-  ON aa.user_id = u.id
-WHERE CONVERT(u.email USING utf8mb4) COLLATE utf8mb4_unicode_ci
-      = CONVERT(@target_email USING utf8mb4) COLLATE utf8mb4_unicode_ci
-ORDER BY aa.created_at ASC, aa.id ASC
-LIMIT 1;
+SET @user_id := (
+    SELECT u.id
+      FROM users u
+     WHERE CONVERT(u.email USING utf8mb4) COLLATE utf8mb4_unicode_ci
+           = CONVERT(@target_email USING utf8mb4) COLLATE utf8mb4_unicode_ci
+     LIMIT 1
+);
+
+SET @organization_id := (
+    SELECT aa.organization_id
+      FROM admin_assignments aa
+     WHERE aa.user_id = @user_id
+     ORDER BY aa.created_at ASC, aa.id ASC
+     LIMIT 1
+);
+
+SET @branch_id := COALESCE(
+    (
+        SELECT aa.branch_id
+          FROM admin_assignments aa
+         WHERE aa.user_id = @user_id
+           AND aa.organization_id = @organization_id
+           AND aa.branch_id IS NOT NULL
+         ORDER BY aa.created_at ASC, aa.id ASC
+         LIMIT 1
+    ),
+    (
+        SELECT b.id
+          FROM branches b
+         WHERE b.organization_id = @organization_id
+         ORDER BY b.id ASC
+         LIMIT 1
+    )
+);
 
 CREATE TEMPORARY TABLE tmp_seed_students AS
 SELECT
@@ -45,10 +52,9 @@ SELECT
     s.monthly_fee,
     ROW_NUMBER() OVER (ORDER BY s.id ASC) AS n
 FROM students s
-JOIN tmp_seed_context ctx
-  ON ctx.organization_id = s.organization_id
- AND ctx.branch_id = s.branch_id
-WHERE CONVERT(s.notes USING utf8mb4) COLLATE utf8mb4_unicode_ci
+WHERE s.organization_id = @organization_id
+  AND s.branch_id = @branch_id
+  AND CONVERT(s.notes USING utf8mb4) COLLATE utf8mb4_unicode_ci
       = CONVERT(@seed_tag USING utf8mb4) COLLATE utf8mb4_unicode_ci;
 
 CREATE TEMPORARY TABLE tmp_seed_classes AS
@@ -56,30 +62,27 @@ SELECT
     (
         SELECT c.id
           FROM classes c
-          JOIN tmp_seed_context ctx
-            ON ctx.organization_id = c.organization_id
-           AND ctx.branch_id = c.branch_id
-         WHERE CONVERT(c.description USING utf8mb4) COLLATE utf8mb4_unicode_ci
+         WHERE c.organization_id = @organization_id
+           AND c.branch_id = @branch_id
+           AND CONVERT(c.description USING utf8mb4) COLLATE utf8mb4_unicode_ci
                = CONVERT(CONCAT(@seed_tag, ' | Grupo infantil demo') USING utf8mb4) COLLATE utf8mb4_unicode_ci
          LIMIT 1
     ) AS class_kids_id,
     (
         SELECT c.id
           FROM classes c
-          JOIN tmp_seed_context ctx
-            ON ctx.organization_id = c.organization_id
-           AND ctx.branch_id = c.branch_id
-         WHERE CONVERT(c.description USING utf8mb4) COLLATE utf8mb4_unicode_ci
+         WHERE c.organization_id = @organization_id
+           AND c.branch_id = @branch_id
+           AND CONVERT(c.description USING utf8mb4) COLLATE utf8mb4_unicode_ci
                = CONVERT(CONCAT(@seed_tag, ' | Grupo intermedio demo') USING utf8mb4) COLLATE utf8mb4_unicode_ci
          LIMIT 1
     ) AS class_teens_id,
     (
         SELECT c.id
           FROM classes c
-          JOIN tmp_seed_context ctx
-            ON ctx.organization_id = c.organization_id
-           AND ctx.branch_id = c.branch_id
-         WHERE CONVERT(c.description USING utf8mb4) COLLATE utf8mb4_unicode_ci
+         WHERE c.organization_id = @organization_id
+           AND c.branch_id = @branch_id
+           AND CONVERT(c.description USING utf8mb4) COLLATE utf8mb4_unicode_ci
                = CONVERT(CONCAT(@seed_tag, ' | Grupo adultos demo') USING utf8mb4) COLLATE utf8mb4_unicode_ci
          LIMIT 1
     ) AS class_adults_id;
@@ -157,8 +160,8 @@ INSERT INTO payments (
 )
 SELECT
     ss.student_id,
-    ctx.organization_id,
-    ctx.branch_id,
+    @organization_id,
+    @branch_id,
     ss.monthly_fee,
     'USD',
     CAST(DATE_FORMAT(UTC_DATE(), '%Y-%m-01') AS DATE),
@@ -171,15 +174,16 @@ SELECT
         ELSE 'other'
     END AS method,
     'paid',
-    ctx.user_id,
+    @user_id,
     @seed_tag
 FROM tmp_seed_students ss
-CROSS JOIN tmp_seed_context ctx
 WHERE ss.n <= 28
   AND NOT EXISTS (
       SELECT 1
         FROM payments p
        WHERE p.student_id = ss.student_id
+         AND p.organization_id = @organization_id
+         AND p.branch_id = @branch_id
          AND p.period_start = CAST(DATE_FORMAT(UTC_DATE(), '%Y-%m-01') AS DATE)
          AND p.status = 'paid'
          AND CONVERT(p.notes USING utf8mb4) COLLATE utf8mb4_unicode_ci
@@ -202,8 +206,8 @@ INSERT INTO payments (
 )
 SELECT
     ss.student_id,
-    ctx.organization_id,
-    ctx.branch_id,
+    @organization_id,
+    @branch_id,
     ss.monthly_fee,
     'USD',
     CAST(DATE_FORMAT(DATE_SUB(UTC_DATE(), INTERVAL 1 MONTH), '%Y-%m-01') AS DATE),
@@ -216,15 +220,16 @@ SELECT
         ELSE 'other'
     END AS method,
     'paid',
-    ctx.user_id,
+    @user_id,
     @seed_tag
 FROM tmp_seed_students ss
-CROSS JOIN tmp_seed_context ctx
 WHERE ss.n <= 14
   AND NOT EXISTS (
       SELECT 1
         FROM payments p
        WHERE p.student_id = ss.student_id
+         AND p.organization_id = @organization_id
+         AND p.branch_id = @branch_id
          AND p.period_start = CAST(DATE_FORMAT(DATE_SUB(UTC_DATE(), INTERVAL 1 MONTH), '%Y-%m-01') AS DATE)
          AND p.status = 'paid'
          AND CONVERT(p.notes USING utf8mb4) COLLATE utf8mb4_unicode_ci
@@ -247,8 +252,8 @@ INSERT INTO payments (
 )
 SELECT
     ss.student_id,
-    ctx.organization_id,
-    ctx.branch_id,
+    @organization_id,
+    @branch_id,
     ss.monthly_fee,
     'USD',
     CAST(DATE_FORMAT(DATE_SUB(UTC_DATE(), INTERVAL 1 MONTH), '%Y-%m-01') AS DATE),
@@ -261,15 +266,16 @@ SELECT
         ELSE 'other'
     END AS method,
     'paid',
-    ctx.user_id,
+    @user_id,
     @seed_tag
 FROM tmp_seed_students ss
-CROSS JOIN tmp_seed_context ctx
 WHERE ss.n BETWEEN 29 AND 36
   AND NOT EXISTS (
       SELECT 1
         FROM payments p
        WHERE p.student_id = ss.student_id
+         AND p.organization_id = @organization_id
+         AND p.branch_id = @branch_id
          AND p.period_start = CAST(DATE_FORMAT(DATE_SUB(UTC_DATE(), INTERVAL 1 MONTH), '%Y-%m-01') AS DATE)
          AND p.status = 'paid'
          AND CONVERT(p.notes USING utf8mb4) COLLATE utf8mb4_unicode_ci
@@ -292,8 +298,8 @@ INSERT INTO payments (
 )
 SELECT
     ss.student_id,
-    ctx.organization_id,
-    ctx.branch_id,
+    @organization_id,
+    @branch_id,
     ss.monthly_fee,
     'USD',
     CAST(DATE_FORMAT(UTC_DATE(), '%Y-%m-01') AS DATE),
@@ -306,10 +312,9 @@ SELECT
         ELSE 'other'
     END AS method,
     'pending',
-    ctx.user_id,
+    @user_id,
     @seed_tag
 FROM tmp_seed_students ss
-CROSS JOIN tmp_seed_context ctx
 WHERE (
         (ss.n BETWEEN 29 AND 36 AND MOD(ss.n, 2) = 0)
         OR ss.n >= 37
@@ -318,6 +323,8 @@ WHERE (
       SELECT 1
         FROM payments p
        WHERE p.student_id = ss.student_id
+         AND p.organization_id = @organization_id
+         AND p.branch_id = @branch_id
          AND p.period_start = CAST(DATE_FORMAT(UTC_DATE(), '%Y-%m-01') AS DATE)
          AND p.status = 'pending'
          AND CONVERT(p.notes USING utf8mb4) COLLATE utf8mb4_unicode_ci
@@ -335,7 +342,7 @@ INSERT INTO attendance (
 SELECT
     ss.student_id,
     ss.primary_class_id,
-    ctx.branch_id,
+    @branch_id,
     DATE_ADD(
         DATE_SUB(UTC_TIMESTAMP(), INTERVAL MOD(ss.n + (num.seq * 3), 28) DAY),
         INTERVAL (17 + MOD(ss.n, 4)) HOUR
@@ -344,7 +351,7 @@ SELECT
         WHEN MOD(ss.n + num.seq, 3) = 0 THEN 'qr'
         ELSE 'manual'
     END AS method,
-    ctx.user_id
+    @user_id
 FROM tmp_seed_students ss
 JOIN tmp_seed_numbers num
   ON num.seq <= CASE
@@ -352,7 +359,6 @@ JOIN tmp_seed_numbers num
       WHEN ss.n <= 30 THEN 3
       ELSE 2
   END
-CROSS JOIN tmp_seed_context ctx
 WHERE ss.primary_class_id IS NOT NULL
   AND NOT EXISTS (
       SELECT 1
@@ -367,6 +373,8 @@ WHERE ss.primary_class_id IS NOT NULL
 
 SELECT
     'activity_seeded' AS step,
+    @organization_id AS organization_id,
+    @branch_id AS branch_id,
     (SELECT COUNT(*) FROM tmp_seed_students) AS seeded_students,
     (
         SELECT COUNT(*)
@@ -377,10 +385,9 @@ SELECT
     (
         SELECT COUNT(*)
           FROM payments p
-          JOIN tmp_seed_context ctx
-            ON ctx.organization_id = p.organization_id
-           AND ctx.branch_id = p.branch_id
-         WHERE CONVERT(p.notes USING utf8mb4) COLLATE utf8mb4_unicode_ci
+         WHERE p.organization_id = @organization_id
+           AND p.branch_id = @branch_id
+           AND CONVERT(p.notes USING utf8mb4) COLLATE utf8mb4_unicode_ci
                = CONVERT(@seed_tag USING utf8mb4) COLLATE utf8mb4_unicode_ci
     ) AS seeded_payments,
     (

@@ -3,70 +3,74 @@ SET NAMES utf8mb4 COLLATE utf8mb4_unicode_ci;
 SET @target_email := 'dantedev22@gmail.com';
 SET @seed_tag := 'seed_demo_prod_20260730';
 SET @student_count := 40;
+SET @user_id := NULL;
+SET @organization_id := NULL;
+SET @branch_id := NULL;
 
-DROP TEMPORARY TABLE IF EXISTS tmp_seed_context;
 DROP TEMPORARY TABLE IF EXISTS tmp_seed_classes;
 DROP TEMPORARY TABLE IF EXISTS tmp_seed_numbers;
 
-CREATE TEMPORARY TABLE tmp_seed_context AS
-SELECT
-    u.id AS user_id,
-    aa.organization_id AS organization_id,
-    COALESCE(
-        (
-            SELECT aa2.branch_id
-              FROM admin_assignments aa2
-             WHERE aa2.user_id = u.id
-               AND aa2.organization_id = aa.organization_id
-               AND aa2.branch_id IS NOT NULL
-             ORDER BY aa2.created_at ASC, aa2.id ASC
-             LIMIT 1
-        ),
-        (
-            SELECT b.id
-              FROM branches b
-             WHERE b.organization_id = aa.organization_id
-             ORDER BY b.id ASC
-             LIMIT 1
-        )
-    ) AS branch_id
-FROM users u
-JOIN admin_assignments aa
-  ON aa.user_id = u.id
-WHERE CONVERT(u.email USING utf8mb4) COLLATE utf8mb4_unicode_ci
-      = CONVERT(@target_email USING utf8mb4) COLLATE utf8mb4_unicode_ci
-ORDER BY aa.created_at ASC, aa.id ASC
-LIMIT 1;
+SET @user_id := (
+    SELECT u.id
+      FROM users u
+     WHERE CONVERT(u.email USING utf8mb4) COLLATE utf8mb4_unicode_ci
+           = CONVERT(@target_email USING utf8mb4) COLLATE utf8mb4_unicode_ci
+     LIMIT 1
+);
+
+SET @organization_id := (
+    SELECT aa.organization_id
+      FROM admin_assignments aa
+     WHERE aa.user_id = @user_id
+     ORDER BY aa.created_at ASC, aa.id ASC
+     LIMIT 1
+);
+
+SET @branch_id := COALESCE(
+    (
+        SELECT aa.branch_id
+          FROM admin_assignments aa
+         WHERE aa.user_id = @user_id
+           AND aa.organization_id = @organization_id
+           AND aa.branch_id IS NOT NULL
+         ORDER BY aa.created_at ASC, aa.id ASC
+         LIMIT 1
+    ),
+    (
+        SELECT b.id
+          FROM branches b
+         WHERE b.organization_id = @organization_id
+         ORDER BY b.id ASC
+         LIMIT 1
+    )
+);
 
 CREATE TEMPORARY TABLE tmp_seed_classes AS
 SELECT
     (
         SELECT c.id
           FROM classes c
-          JOIN tmp_seed_context ctx
-            ON ctx.organization_id = c.organization_id
-           AND ctx.branch_id = c.branch_id
-         WHERE CONVERT(c.description USING utf8mb4) COLLATE utf8mb4_unicode_ci
+         WHERE c.organization_id = @organization_id
+           AND c.branch_id = @branch_id
+           AND CONVERT(c.description USING utf8mb4) COLLATE utf8mb4_unicode_ci
                = CONVERT(CONCAT(@seed_tag, ' | Grupo infantil demo') USING utf8mb4) COLLATE utf8mb4_unicode_ci
          LIMIT 1
     ) AS class_kids_id,
     (
         SELECT c.id
           FROM classes c
-          JOIN tmp_seed_context ctx
-            ON ctx.organization_id = c.organization_id
-           AND ctx.branch_id = c.branch_id
-         WHERE CONVERT(c.description USING utf8mb4) COLLATE utf8mb4_unicode_ci
+         WHERE c.organization_id = @organization_id
+           AND c.branch_id = @branch_id
+           AND CONVERT(c.description USING utf8mb4) COLLATE utf8mb4_unicode_ci
                = CONVERT(CONCAT(@seed_tag, ' | Grupo intermedio demo') USING utf8mb4) COLLATE utf8mb4_unicode_ci
          LIMIT 1
     ) AS class_teens_id,
     (
         SELECT c.id
           FROM classes c
-          JOIN tmp_seed_context ctx
-            ON ctx.organization_id = c.organization_id
-           AND ctx.branch_id = c.branch_id
-         WHERE CONVERT(c.description USING utf8mb4) COLLATE utf8mb4_unicode_ci
+         WHERE c.organization_id = @organization_id
+           AND c.branch_id = @branch_id
+           AND CONVERT(c.description USING utf8mb4) COLLATE utf8mb4_unicode_ci
                = CONVERT(CONCAT(@seed_tag, ' | Grupo adultos demo') USING utf8mb4) COLLATE utf8mb4_unicode_ci
          LIMIT 1
     ) AS class_adults_id;
@@ -105,9 +109,9 @@ INSERT INTO students (
     notes
 )
 SELECT
-    ctx.organization_id,
-    ctx.branch_id,
-    UPPER(SUBSTRING(MD5(CONCAT(@seed_tag, '-', ctx.organization_id, '-', n.n)), 1, 8)) AS unique_code,
+    @organization_id,
+    @branch_id,
+    UPPER(SUBSTRING(MD5(CONCAT(@seed_tag, '-', @organization_id, '-', n.n)), 1, 8)) AS unique_code,
     NULL AS user_id,
     CASE MOD(n.n, 10)
         WHEN 1 THEN 'Mateo'
@@ -189,24 +193,28 @@ SELECT
     END AS guardian_phone,
     @seed_tag AS notes
 FROM tmp_seed_numbers n
-CROSS JOIN tmp_seed_context ctx
 CROSS JOIN tmp_seed_classes cls
-WHERE cls.class_kids_id IS NOT NULL
+WHERE @organization_id IS NOT NULL
+  AND @branch_id IS NOT NULL
+  AND cls.class_kids_id IS NOT NULL
   AND cls.class_teens_id IS NOT NULL
   AND cls.class_adults_id IS NOT NULL
   AND NOT EXISTS (
       SELECT 1
         FROM students s
-       WHERE CONVERT(s.notes USING utf8mb4) COLLATE utf8mb4_unicode_ci
+       WHERE s.organization_id = @organization_id
+         AND s.branch_id = @branch_id
+         AND CONVERT(s.notes USING utf8mb4) COLLATE utf8mb4_unicode_ci
              = CONVERT(@seed_tag USING utf8mb4) COLLATE utf8mb4_unicode_ci
   );
 
 SELECT
     'students_seeded' AS step,
+    @organization_id AS organization_id,
+    @branch_id AS branch_id,
     COUNT(*) AS seeded_students
 FROM students s
-JOIN tmp_seed_context ctx
-  ON ctx.organization_id = s.organization_id
- AND ctx.branch_id = s.branch_id
-WHERE CONVERT(s.notes USING utf8mb4) COLLATE utf8mb4_unicode_ci
+WHERE s.organization_id = @organization_id
+  AND s.branch_id = @branch_id
+  AND CONVERT(s.notes USING utf8mb4) COLLATE utf8mb4_unicode_ci
       = CONVERT(@seed_tag USING utf8mb4) COLLATE utf8mb4_unicode_ci;
