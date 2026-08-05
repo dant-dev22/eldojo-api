@@ -5,6 +5,7 @@ from app.models.curriculum import Discipline
 from app.models.email_verification import EmailVerificationToken
 from app.models.finance import Payment
 from app.models.organization import Branch, Organization
+from app.models.session_sync_ticket import SessionSyncTicket
 from app.models.student import Student
 from app.models.teaching import Attendance, ClassEnrollment, ClassSchedule, MartialClass
 from app.models.user import AdminAssignment, User
@@ -21,6 +22,7 @@ __all__ = [
     "MartialClass",
     "Organization",
     "Payment",
+    "SessionSyncTicket",
     "Student",
     "User",
 ]

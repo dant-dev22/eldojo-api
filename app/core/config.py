@@ -71,7 +71,11 @@ class Settings:
                 "http://localhost:8081,http://127.0.0.1:8081,http://localhost:19006,http://127.0.0.1:19006,http://localhost:3000,http://127.0.0.1:3000",
             )
         )
-    ) 
+    )
+    public_web_origin: str = os.getenv("PUBLIC_WEB_ORIGIN", "http://localhost:8081")
+    app_web_origin: str = os.getenv("APP_WEB_ORIGIN", "http://localhost:8082")
+    session_cookie_domain: str | None = os.getenv("SESSION_COOKIE_DOMAIN")
+    session_ticket_ttl_seconds: int = int(os.getenv("SESSION_TICKET_TTL_SECONDS", "30"))
     uploads_dir: Path = Path(os.getenv("UPLOADS_DIR", str(BASE_DIR / "uploads")))
     uploads_url_prefix: str = os.getenv("UPLOADS_URL_PREFIX", "/uploads")
 

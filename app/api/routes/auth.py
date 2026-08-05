@@ -23,6 +23,7 @@ from app.core.security import (
     create_refresh_token,
     decode_refresh_token,
     generate_email_verification_token,
+    generate_session_sync_token,
     hash_email_verification_token,
     hash_password,
     verify_password,
@@ -32,6 +33,7 @@ from app.models.academy_pending_session import AcademyPendingSession
 from app.models.email_verification import EmailVerificationToken
 from app.models.organization import Organization
 from app.models.enums import UserRole
+from app.models.session_sync_ticket import SessionSyncTicket
 from app.models.student import Student
 from app.models.user import AdminAssignment, User
 from app.schemas.auth import (
@@ -43,6 +45,8 @@ from app.schemas.auth import (
     AcademyResendConfirmationRequest,
     LoginRequest,
     RefreshRequest,
+    SessionTicketCreateResponse,
+    SessionTicketRedeemRequest,
     StudentRegisterRequest,
     TokenResponse,
     TutorialStateUpdateRequest,
@@ -674,3 +678,95 @@ def update_tutorial_state(
     db.commit()
     db.refresh(current_user)
     return current_user
+
+
+def _prune_expired_session_tickets(db: Session) -> None:
+    """Limpia tickets expirados (mejorado con limpieza periódica)."""
+
+    stmt = select(SessionSyncTicket).where(SessionSyncTicket.expires_at <= utc_now())
+    expired_tickets = db.scalars(stmt).all()
+    for ticket in expired_tickets:
+        db.delete(ticket)
+
+
+@router.post("/session-ticket/create", response_model=SessionTicketCreateResponse)
+def create_session_sync_ticket(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_active_user),
+) -> SessionTicketCreateResponse:
+    """Crea un ticket de un solo uso para transferir la sesión a app.eldojo.tech.
+
+    Requiere Bearer token válido (se llama desde el sitio público justo después del login).
+    """
+
+    _prune_expired_session_tickets(db)
+
+    raw_ticket = generate_session_sync_token()
+    ticket_hash = hash_email_verification_token(raw_ticket)
+    ttl_seconds = max(10, int(settings.session_ticket_ttl_seconds))
+    expires_at = utc_now() + timedelta(seconds=ttl_seconds)
+
+    db.add(
+        SessionSyncTicket(
+            user_id=current_user.id,
+            ticket_hash=ticket_hash,
+            expires_at=expires_at,
+        )
+    )
+    db.commit()
+
+    return SessionTicketCreateResponse(ticket=raw_ticket, ttl_seconds=ttl_seconds)
+
+
+@router.post("/session-ticket/redeem", response_model=TokenResponse)
+def redeem_session_sync_ticket(
+    payload: SessionTicketRedeemRequest,
+    db: Session = Depends(get_db),
+) -> TokenResponse:
+    """Canjea un ticket de sincronización y devuelve un par access/refresh tokens.
+
+    Endpoint público (no requiere Bearer). Ticket es de un solo uso y vida corta.
+    """
+
+    _prune_expired_session_tickets(db)
+
+    ticket_hash = hash_email_verification_token(payload.ticket)
+    stmt = (
+        select(SessionSyncTicket)
+        .where(SessionSyncTicket.ticket_hash == ticket_hash)
+        .with_for_update()
+    )
+    sync_ticket = db.scalar(stmt)
+
+    if sync_ticket is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="El ticket de inicio de sesión no es válido.",
+        )
+
+    now = utc_now()
+    if sync_ticket.used_at is not None:
+        raise HTTPException(
+            status_code=status.HTTP_410_GONE,
+            detail="El ticket de inicio de sesión ya fue utilizado.",
+        )
+    if sync_ticket.expires_at <= now:
+        raise HTTPException(
+            status_code=status.HTTP_410_GONE,
+            detail="El ticket de inicio de sesión ha expirado. Vuelve a iniciar sesión.",
+        )
+
+    user = db.get(User, sync_ticket.user_id)
+    if user is None or not user.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="La cuenta asociada ya no está disponible.",
+        )
+
+    sync_ticket.used_at = now
+    user.last_login_at = now
+    db.commit()
+    db.refresh(user)
+
+    return build_token_response(user)
+

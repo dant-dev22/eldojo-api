@@ -58,10 +58,16 @@ def generate_email_verification_token() -> str:
     return secrets.token_urlsafe(32)
 
 
-def hash_email_verification_token(token: str) -> str:
-    """Hashea el token de verificación para no almacenarlo en texto plano."""
+def generate_session_sync_token() -> str:
+    """Genera un ticket URL-safe para sincronizar sesión entre subdominios."""
 
-    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+    return secrets.token_urlsafe(32)
+
+
+def hash_email_verification_token(raw_token: str) -> str:
+    """Hashea un token de verificación/ticket para guardarlo en BD."""
+
+    return hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
 
 
 def _create_token(*, user_id: int, email: str, role: str, token_type: str, ttl_seconds: int) -> tuple[str, int]:
