@@ -7,12 +7,13 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import or_, select
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from app.api.dependencies import require_active_user
 from app.core.authorization import ensure_can_access_operational_scope, scope_branch_filter
 from app.core.student_codes import build_student_unique_code
 from app.db.session import get_db
+from app.models.belts import BeltLevel, BeltStripe
 from app.models.enums import StudentStatus, UserRole
 from app.models.organization import Branch, Organization
 from app.models.student import Student
@@ -25,13 +26,70 @@ from app.schemas.student import StudentCreate, StudentRead, StudentUpdate
 router = APIRouter(prefix="/students", tags=["students"])
 
 
+def _student_load_options():
+    return (
+        selectinload(Student.current_belt_level),
+        selectinload(Student.current_stripe),
+    )
+
+
 def get_student_or_404(db: Session, student_id: int) -> Student:
     """Obtiene un alumno existente o corta con 404."""
 
-    student = db.get(Student, student_id)
+    student = db.scalar(
+        select(Student)
+        .where(Student.id == student_id)
+        .options(*_student_load_options())
+    )
     if student is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Alumno no encontrado")
     return student
+
+
+def validate_belt_links(
+    db: Session,
+    *,
+    organization_id: int,
+    current_belt_level_id: int | None,
+    current_stripe_id: int | None,
+) -> None:
+    """Valida que el nivel de cinta y stripe pertenezcan a la organización y sean coherentes."""
+
+    if current_belt_level_id is None and current_stripe_id is None:
+        return
+
+    belt_level: BeltLevel | None = None
+    if current_belt_level_id is not None:
+        belt_level = db.get(BeltLevel, current_belt_level_id)
+        if belt_level is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Nivel de cinta no encontrado",
+            )
+        if belt_level.organization_id != organization_id:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="El nivel de cinta no pertenece a la organización indicada",
+            )
+
+    if current_stripe_id is not None:
+        stripe = db.get(BeltStripe, current_stripe_id)
+        if stripe is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Stripe de cinta no encontrado",
+            )
+        stripe_level = db.get(BeltLevel, stripe.belt_level_id)
+        if stripe_level is None or stripe_level.organization_id != organization_id:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="El stripe de cinta no pertenece a la organización indicada",
+            )
+        if current_belt_level_id is not None and stripe.belt_level_id != current_belt_level_id:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="El stripe seleccionado no pertenece al nivel de cinta indicado",
+            )
 
 
 def validate_student_links(
@@ -41,8 +99,10 @@ def validate_student_links(
     branch_id: int,
     user_id: int | None,
     primary_class_id: int | None,
+    current_belt_level_id: int | None = None,
+    current_stripe_id: int | None = None,
 ) -> Organization:
-    """Valida referencias y coherencia entre organización, sucursal y clase."""
+    """Valida referencias y coherencia entre organización, sucursal, clase y cinturones."""
 
     organization = db.get(Organization, organization_id)
     if organization is None:
@@ -77,6 +137,13 @@ def validate_student_links(
                 detail="La clase principal debe pertenecer a la misma organización y sucursal del alumno",
             )
 
+    validate_belt_links(
+        db,
+        organization_id=organization_id,
+        current_belt_level_id=current_belt_level_id,
+        current_stripe_id=current_stripe_id,
+    )
+
     return organization
 
 
@@ -99,6 +166,8 @@ def create_student(
         branch_id=payload.branch_id,
         user_id=payload.user_id,
         primary_class_id=payload.primary_class_id,
+        current_belt_level_id=payload.current_belt_level_id,
+        current_stripe_id=payload.current_stripe_id,
     )
 
     student = Student(
@@ -116,8 +185,12 @@ def create_student(
             detail="No fue posible crear el alumno por un conflicto de integridad",
         ) from exc
 
-    db.refresh(student)
-    return student
+    refreshed = db.scalar(
+        select(Student)
+        .where(Student.id == student.id)
+        .options(*_student_load_options())
+    )
+    return refreshed or student
 
 
 @router.get("", response_model=list[StudentRead])
@@ -137,7 +210,11 @@ def list_students(
         organization_id=organization_id,
         branch_id=branch_id,
     )
-    query = select(Student).order_by(Student.id)
+    query = (
+        select(Student)
+        .options(*_student_load_options())
+        .order_by(Student.id)
+    )
 
     if organization_id is not None:
         query = query.where(Student.organization_id == organization_id)
@@ -156,7 +233,7 @@ def list_students(
     if not include_deleted:
         query = query.where(Student.deleted_at.is_(None))
 
-    return list(db.scalars(query).all())
+    return list(db.scalars(query).unique().all())
 
 
 @router.get("/{student_id}", response_model=StudentRead)
@@ -195,6 +272,8 @@ def update_student(
     branch_id = changes.get("branch_id", student.branch_id)
     user_id = changes.get("user_id", student.user_id)
     primary_class_id = changes.get("primary_class_id", student.primary_class_id)
+    current_belt_level_id = changes.get("current_belt_level_id", student.current_belt_level_id)
+    current_stripe_id = changes.get("current_stripe_id", student.current_stripe_id)
 
     ensure_can_access_operational_scope(
         current_user,
@@ -208,6 +287,8 @@ def update_student(
         branch_id=branch_id,
         user_id=user_id,
         primary_class_id=primary_class_id,
+        current_belt_level_id=current_belt_level_id,
+        current_stripe_id=current_stripe_id,
     )
 
     for field_name, value in changes.items():
@@ -222,8 +303,12 @@ def update_student(
             detail="No fue posible actualizar el alumno por un conflicto de integridad",
         ) from exc
 
-    db.refresh(student)
-    return student
+    refreshed = db.scalar(
+        select(Student)
+        .where(Student.id == student.id)
+        .options(*_student_load_options())
+    )
+    return refreshed or student
 
 
 @router.delete("/{student_id}", response_model=MessageResponse)

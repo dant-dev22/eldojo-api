@@ -33,6 +33,7 @@ class Organization(Base):
     branches = relationship("Branch", back_populates="organization")
     admin_assignments = relationship("AdminAssignment", back_populates="organization")
     disciplines = relationship("Discipline", back_populates="organization")
+    belt_levels = relationship("BeltLevel", back_populates="organization", cascade="all, delete-orphan")
     students = relationship("Student", back_populates="organization")
     classes = relationship("MartialClass", back_populates="organization")
     payments = relationship("Payment", back_populates="organization")

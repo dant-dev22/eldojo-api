@@ -1,6 +1,7 @@
 """Modelos ORM mínimos que el backend usa para operar sobre la DB existente."""
 
 from app.models.academy_pending_session import AcademyPendingSession
+from app.models.belts import BeltLevel, BeltStripe, StudentBeltHistory
 from app.models.curriculum import Discipline
 from app.models.email_verification import EmailVerificationToken
 from app.models.finance import Payment
@@ -14,6 +15,8 @@ __all__ = [
     "AcademyPendingSession",
     "AdminAssignment",
     "Attendance",
+    "BeltLevel",
+    "BeltStripe",
     "Branch",
     "ClassEnrollment",
     "ClassSchedule",
@@ -24,5 +27,6 @@ __all__ = [
     "Payment",
     "SessionSyncTicket",
     "Student",
+    "StudentBeltHistory",
     "User",
 ]

@@ -8,6 +8,7 @@ from decimal import Decimal
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl, field_validator, model_validator
 
 from app.models.enums import PaymentStatus, StudentStatus
+from app.schemas.belt import BeltLevelSummary, BeltStripeSummary
 
 
 class StudentBase(BaseModel):
@@ -24,6 +25,8 @@ class StudentBase(BaseModel):
     photo_url: HttpUrl | None = None
     enrollment_date: date
     primary_class_id: int | None = Field(default=None, gt=0)
+    current_belt_level_id: int | None = Field(default=None, gt=0)
+    current_stripe_id: int | None = Field(default=None, gt=0)
     monthly_fee: Decimal | None = Field(default=None, ge=0, max_digits=10, decimal_places=2)
     currency: str = Field(default="MXN", min_length=3, max_length=3)
     next_payment_date: date | None = None
@@ -67,6 +70,8 @@ class StudentUpdate(BaseModel):
     photo_url: HttpUrl | None = None
     enrollment_date: date | None = None
     primary_class_id: int | None = Field(default=None, gt=0)
+    current_belt_level_id: int | None = Field(default=None, gt=0)
+    current_stripe_id: int | None = Field(default=None, gt=0)
     monthly_fee: Decimal | None = Field(default=None, ge=0, max_digits=10, decimal_places=2)
     currency: str | None = Field(default=None, min_length=3, max_length=3)
     next_payment_date: date | None = None
@@ -104,6 +109,8 @@ class StudentRead(BaseModel):
     photo_url: str | None
     enrollment_date: date
     primary_class_id: int | None
+    current_belt_level_id: int | None
+    current_stripe_id: int | None
     monthly_fee: Decimal | None
     currency: str
     next_payment_date: date | None
@@ -115,3 +122,5 @@ class StudentRead(BaseModel):
     created_at: datetime
     updated_at: datetime
     deleted_at: datetime | None
+    current_belt_level: BeltLevelSummary | None = None
+    current_stripe: BeltStripeSummary | None = None

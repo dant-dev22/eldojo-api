@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends
 from app.api.dependencies import require_active_user
 from app.api.routes.auth import router as auth_router
 from app.api.routes.attendance import router as attendance_router
+from app.api.routes.belts import router as belts_router
 from app.api.routes.branches import router as branches_router
 from app.api.routes.class_enrollments import router as class_enrollments_router
 from app.api.routes.class_schedules import router as class_schedules_router
@@ -34,5 +35,6 @@ api_router.include_router(classes_router, dependencies=[Depends(require_active_u
 api_router.include_router(class_schedules_router, dependencies=[Depends(require_active_user)])
 api_router.include_router(class_enrollments_router, dependencies=[Depends(require_active_user)])
 api_router.include_router(attendance_router, dependencies=[Depends(require_active_user)])
+api_router.include_router(belts_router, dependencies=[Depends(require_active_user)])
 api_router.include_router(students_router, dependencies=[Depends(require_active_user)])
 api_router.include_router(payments_router, dependencies=[Depends(require_active_user)])

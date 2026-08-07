@@ -53,6 +53,14 @@ class Student(Base):
         db_enum(StudentStatus, name="student_status"),
         nullable=False,
     )
+    current_belt_level_id: Mapped[int | None] = mapped_column(
+        ForeignKey("belt_levels.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+    current_stripe_id: Mapped[int | None] = mapped_column(
+        ForeignKey("belt_stripes.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
     guardian_name: Mapped[str | None] = mapped_column(String(150), nullable=True)
     guardian_phone: Mapped[str | None] = mapped_column(String(50), nullable=True)
     notes: Mapped[str | None] = mapped_column(Text(), nullable=True)
@@ -72,6 +80,9 @@ class Student(Base):
     branch = relationship("Branch", back_populates="students")
     user = relationship("User", back_populates="students")
     primary_class = relationship("MartialClass", back_populates="students")
+    current_belt_level = relationship("BeltLevel", back_populates="student_current_belts")
+    current_stripe = relationship("BeltStripe", back_populates="student_current_stripes")
     class_enrollments = relationship("ClassEnrollment", back_populates="student")
     attendance_records = relationship("Attendance", back_populates="student")
     payments = relationship("Payment", back_populates="student")
+    belt_histories = relationship("StudentBeltHistory", back_populates="student", cascade="all, delete-orphan")
