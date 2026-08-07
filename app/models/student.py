@@ -95,3 +95,9 @@ class Student(Base):
         cascade="all, delete-orphan",
         primaryjoin="and_(TrajectoryEvent.student_id==Student.id, TrajectoryEvent.deleted_at.is_(None))",
     )
+    fight_records = relationship(
+        "StudentFightRecord",
+        back_populates="student",
+        cascade="all, delete-orphan",
+        primaryjoin="and_(StudentFightRecord.student_id==Student.id, StudentFightRecord.deleted_at.is_(None))",
+    )

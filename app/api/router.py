@@ -13,6 +13,7 @@ from app.api.routes.class_enrollments import router as class_enrollments_router
 from app.api.routes.class_schedules import router as class_schedules_router
 from app.api.routes.classes import router as classes_router
 from app.api.routes.disciplines import router as disciplines_router
+from app.api.routes.fight_records import router as fight_records_router
 from app.api.routes.health import router as health_router
 from app.api.routes.me import router as me_router
 from app.api.routes.organizations import router as organizations_router
@@ -40,3 +41,4 @@ api_router.include_router(belts_router, dependencies=[Depends(require_active_use
 api_router.include_router(students_router, dependencies=[Depends(require_active_user)])
 api_router.include_router(trajectory_router, dependencies=[Depends(require_active_user)])
 api_router.include_router(payments_router, dependencies=[Depends(require_active_user)])
+api_router.include_router(fight_records_router, dependencies=[Depends(require_active_user)])
