@@ -35,6 +35,9 @@ class StudentBase(BaseModel):
     guardian_name: str | None = Field(default=None, max_length=150)
     guardian_phone: str | None = Field(default=None, max_length=50)
     notes: str | None = None
+    rd_victorias: int = Field(default=0, ge=0)
+    rd_empates: int = Field(default=0, ge=0)
+    rd_derrotas: int = Field(default=0, ge=0)
 
     @field_validator("currency")
     @classmethod
@@ -80,6 +83,9 @@ class StudentUpdate(BaseModel):
     guardian_name: str | None = Field(default=None, max_length=150)
     guardian_phone: str | None = Field(default=None, max_length=50)
     notes: str | None = None
+    rd_victorias: int | None = Field(default=None, ge=0)
+    rd_empates: int | None = Field(default=None, ge=0)
+    rd_derrotas: int | None = Field(default=None, ge=0)
 
     @field_validator("currency")
     @classmethod
@@ -119,6 +125,9 @@ class StudentRead(BaseModel):
     guardian_name: str | None
     guardian_phone: str | None
     notes: str | None
+    rd_victorias: int
+    rd_empates: int
+    rd_derrotas: int
     created_at: datetime
     updated_at: datetime
     deleted_at: datetime | None

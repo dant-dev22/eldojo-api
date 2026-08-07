@@ -64,6 +64,9 @@ class Student(Base):
     guardian_name: Mapped[str | None] = mapped_column(String(150), nullable=True)
     guardian_phone: Mapped[str | None] = mapped_column(String(50), nullable=True)
     notes: Mapped[str | None] = mapped_column(Text(), nullable=True)
+    rd_victorias: Mapped[int] = mapped_column(nullable=False, server_default=text("0"))
+    rd_empates: Mapped[int] = mapped_column(nullable=False, server_default=text("0"))
+    rd_derrotas: Mapped[int] = mapped_column(nullable=False, server_default=text("0"))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(),
         nullable=False,
