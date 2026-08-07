@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from sqlalchemy import Boolean, DateTime, ForeignKey, String, Integer, text
-from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.orm import Mapped, mapped_column, relationship as sa_relationship
 
 from app.db.base import Base
 
@@ -59,6 +59,6 @@ class AuthorizedPerson(Base):
     )
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(), nullable=True)
 
-    student = relationship("Student", back_populates="authorized_persons")
-    organization = relationship("Organization")
-    verified_by_user = relationship("User")
+    student = sa_relationship("Student", back_populates="authorized_persons")
+    organization = sa_relationship("Organization")
+    verified_by_user = sa_relationship("User")

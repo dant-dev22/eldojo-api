@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from sqlalchemy import DateTime, ForeignKey, String, Integer, text
-from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.orm import Mapped, mapped_column, relationship as sa_relationship
 
 from app.db.base import Base
 
@@ -43,5 +43,5 @@ class EmergencyContact(Base):
     )
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(), nullable=True)
 
-    student = relationship("Student", back_populates="emergency_contacts")
-    organization = relationship("Organization")
+    student = sa_relationship("Student", back_populates="emergency_contacts")
+    organization = sa_relationship("Organization")
