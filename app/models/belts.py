@@ -46,12 +46,12 @@ class BeltLevel(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(),
         nullable=False,
-        server_default=text("UTC_TIMESTAMP()"),
+        server_default=text("CURRENT_TIMESTAMP"),
     )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(),
         nullable=False,
-        server_default=text("UTC_TIMESTAMP()"),
+        server_default=text("CURRENT_TIMESTAMP"),
     )
 
     organization = relationship("Organization", back_populates="belt_levels")
@@ -83,12 +83,12 @@ class BeltStripe(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(),
         nullable=False,
-        server_default=text("UTC_TIMESTAMP()"),
+        server_default=text("CURRENT_TIMESTAMP"),
     )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(),
         nullable=False,
-        server_default=text("UTC_TIMESTAMP()"),
+        server_default=text("CURRENT_TIMESTAMP"),
     )
 
     belt_level = relationship("BeltLevel", back_populates="stripes")
@@ -130,7 +130,7 @@ class StudentBeltHistory(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(),
         nullable=False,
-        server_default=text("UTC_TIMESTAMP()"),
+        server_default=text("CURRENT_TIMESTAMP"),
     )
 
     student = relationship("Student", back_populates="belt_histories")
