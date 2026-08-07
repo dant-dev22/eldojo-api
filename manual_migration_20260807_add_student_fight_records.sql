@@ -3,17 +3,25 @@
 -- Fecha: 2026-08-07
 -- Cada alumno puede tener N peleas, cada una con tipo, rival y fecha
 --
--- IMPORTANTE: SET SESSION al inicio para evitar ERROR 1419 en entornos
--- con binary logging (RDS, Cloud SQL, réplicas) donde el usuario no tiene SUPER.
--- Esto sólo afecta la sesión actual del SOURCE, NO el servidor globalmente.
+-- IMPORTANTE: La sincronización de los totales rd_victorias / rd_empates /
+-- rd_derrotas en la tabla `students` YA NO SE HACE CON TRIGGERS.
+-- Motivos:
+--   1) Entornos managed (RDS/Cloud SQL/réplicas) con binary logging suelen
+--      tener log_bin_trust_function_creators como variable GLOBAL-ONLY y el
+--      usuario de la app NO tiene SUPER ni SET GLOBAL → ERROR 1229 + 1419.
+--   2) El endpoint DELETE de la API es SOFT DELETE (deleted_at), por lo que
+--      el trigger AFTER DELETE físico NUNCA se dispararía y habría
+--      divergencia silenciosa de totales.
+--
+-- En su lugar, la sincronización se realiza en la capa de servicio del
+-- backend (app/services/fight_record_sync.py) de forma atómica y transaccional
+-- en los endpoints POST / PATCH / DELETE.
+--
+-- Para reconciliación / backfill inicial, ver el SP al final del archivo.
 -- ============================================================
 
--- Habilita creación de triggers/programas almacenados sin privilegio SUPER.
--- (Sólo válido para esta conexión / SOURCE. No requiere DBA.)
-SET SESSION log_bin_trust_function_creators = 1;
-
 -- -----------------------------------------------------------
--- 1. Tabla student_fight_records (índices inline = idempotente)
+-- 1. Tabla student_fight_records (índices inline + IF NOT EXISTS)
 -- -----------------------------------------------------------
 CREATE TABLE IF NOT EXISTS student_fight_records (
     id              INT AUTO_INCREMENT PRIMARY KEY,
@@ -33,83 +41,35 @@ CREATE TABLE IF NOT EXISTS student_fight_records (
     CONSTRAINT chk_student_fight_records_opponent_not_empty
         CHECK (CHAR_LENGTH(TRIM(opponent_name)) > 0),
 
-    -- Índices declarados inline → al re-ejecutar con IF NOT EXISTS no hay
-    -- errores de "duplicate key name" (a diferencia de ALTER TABLE ADD INDEX).
     INDEX ix_student_fight_records_student       (student_id),
     INDEX ix_student_fight_records_date          (fight_date),
     INDEX ix_student_fight_records_type          (record_type),
     INDEX ix_student_fight_records_student_date  (student_id, fight_date)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
--- -----------------------------------------------------------
--- 2. Trigger para mantener sincronizados los totales
---    rd_victorias / rd_empates / rd_derrotas en students
---    al INSERTAR un nuevo registro
--- -----------------------------------------------------------
-DROP TRIGGER IF EXISTS trg_student_fight_records_after_insert;
-DELIMITER //
-CREATE TRIGGER trg_student_fight_records_after_insert
-AFTER INSERT ON student_fight_records
-FOR EACH ROW
-BEGIN
-    CASE NEW.record_type
-        WHEN 'victoria' THEN
-            UPDATE students SET rd_victorias = rd_victorias + 1 WHERE id = NEW.student_id;
-        WHEN 'empate' THEN
-            UPDATE students SET rd_empates   = rd_empates   + 1 WHERE id = NEW.student_id;
-        WHEN 'derrota' THEN
-            UPDATE students SET rd_derrotas  = rd_derrotas  + 1 WHERE id = NEW.student_id;
-    END CASE;
-END //
-DELIMITER ;
-
--- -----------------------------------------------------------
--- 3. Trigger al ACTUALIZAR un registro (cambio de tipo o de alumno)
--- -----------------------------------------------------------
-DROP TRIGGER IF EXISTS trg_student_fight_records_after_update;
-DELIMITER //
-CREATE TRIGGER trg_student_fight_records_after_update
-AFTER UPDATE ON student_fight_records
-FOR EACH ROW
-BEGIN
-    -- Restar del tipo anterior en el alumno anterior (o actual si no cambió alumno)
-    CASE OLD.record_type
-        WHEN 'victoria' THEN
-            UPDATE students SET rd_victorias = GREATEST(rd_victorias - 1, 0) WHERE id = OLD.student_id;
-        WHEN 'empate' THEN
-            UPDATE students SET rd_empates   = GREATEST(rd_empates   - 1, 0) WHERE id = OLD.student_id;
-        WHEN 'derrota' THEN
-            UPDATE students SET rd_derrotas  = GREATEST(rd_derrotas  - 1, 0) WHERE id = OLD.student_id;
-    END CASE;
-
-    -- Sumar al nuevo tipo en el alumno nuevo
-    CASE NEW.record_type
-        WHEN 'victoria' THEN
-            UPDATE students SET rd_victorias = rd_victorias + 1 WHERE id = NEW.student_id;
-        WHEN 'empate' THEN
-            UPDATE students SET rd_empates   = rd_empates   + 1 WHERE id = NEW.student_id;
-        WHEN 'derrota' THEN
-            UPDATE students SET rd_derrotas  = rd_derrotas  + 1 WHERE id = NEW.student_id;
-    END CASE;
-END //
-DELIMITER ;
-
--- -----------------------------------------------------------
--- 4. Trigger al ELIMINAR físicamente un registro (restar del total)
--- -----------------------------------------------------------
-DROP TRIGGER IF EXISTS trg_student_fight_records_after_delete;
-DELIMITER //
-CREATE TRIGGER trg_student_fight_records_after_delete
-AFTER DELETE ON student_fight_records
-FOR EACH ROW
-BEGIN
-    CASE OLD.record_type
-        WHEN 'victoria' THEN
-            UPDATE students SET rd_victorias = GREATEST(rd_victorias - 1, 0) WHERE id = OLD.student_id;
-        WHEN 'empate' THEN
-            UPDATE students SET rd_empates   = GREATEST(rd_empates   - 1, 0) WHERE id = OLD.student_id;
-        WHEN 'derrota' THEN
-            UPDATE students SET rd_derrotas  = GREATEST(rd_derrotas  - 1, 0) WHERE id = OLD.student_id;
-    END CASE;
-END //
-DELIMITER ;
+-- ============================================================
+-- 2. Reconciliación / Backfill (opcional, ejecutar una vez)
+--
+-- Si ya hay registros en student_fight_records o si los totales en
+-- students se desincronizaron por cualquier motivo, ejecuta el
+-- siguiente bloque para reconstruir rd_victorias / rd_empates / rd_derrotas
+-- a partir de los registros NO borrados (soft delete compatible).
+--
+-- Descomenta el bloque inferior cuando lo necesites.
+-- ============================================================
+--
+-- UPDATE students s
+--   LEFT JOIN (
+--       SELECT student_id,
+--              SUM(record_type = 'victoria') AS v,
+--              SUM(record_type = 'empate')   AS e,
+--              SUM(record_type = 'derrota')  AS d
+--         FROM student_fight_records
+--        WHERE deleted_at IS NULL
+--        GROUP BY student_id
+--   ) r ON r.student_id = s.id
+--   SET s.rd_victorias = COALESCE(r.v, 0),
+--       s.rd_empates   = COALESCE(r.e, 0),
+--       s.rd_derrotas  = COALESCE(r.d, 0);
+--
+-- SELECT 'Backfill completado. Filas en students actualizadas según COUNT real.' AS resultado;

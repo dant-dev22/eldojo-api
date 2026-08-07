@@ -4,12 +4,14 @@ Cada alumno puede tener una colección de victorias, empates o derrotas
 registradas individualmente con nombre del rival (≤50 chars) y fecha.
 
 Los totales agregados rd_victorias / rd_empates / rd_derrotas en la tabla
-students se mantienen automáticamente mediante triggers SQL.
+students se mantienen automáticamente en la capa de servicio
+(app.services.fight_record_sync) de forma atómica y transaccional en
+los endpoints de escritura (POST / PATCH / DELETE).
 """
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select
@@ -26,6 +28,11 @@ from app.schemas.fight_record import (
     StudentFightRecordCreate,
     StudentFightRecordRead,
     StudentFightRecordUpdate,
+)
+from app.services.fight_record_sync import (
+    sync_student_fight_totals_after_create,
+    sync_student_fight_totals_after_soft_delete,
+    sync_student_fight_totals_after_update,
 )
 
 router = APIRouter(prefix="/fight-records", tags=["fight-records"])
@@ -73,6 +80,13 @@ def create_fight_record(
         fight_date=payload.fight_date,
     )
     db.add(record)
+    db.flush()
+
+    sync_student_fight_totals_after_create(
+        db,
+        student_id=record.student_id,
+        new_record_type=record.record_type,
+    )
     db.commit()
     db.refresh(record)
     return record
@@ -150,9 +164,23 @@ def update_fight_record(
         branch_id=student.branch_id,
     )
 
+    old_student_id = record.student_id
+    old_record_type = record.record_type
+
     changes = payload.model_dump(exclude_unset=True)
     for field_name, value in changes.items():
         setattr(record, field_name, value)
+
+    db.flush()
+
+    if "record_type" in changes or "student_id" in changes:
+        sync_student_fight_totals_after_update(
+            db,
+            old_student_id=old_student_id,
+            new_student_id=record.student_id,
+            old_record_type=old_record_type,
+            new_record_type=record.record_type,
+        )
 
     db.commit()
     db.refresh(record)
@@ -175,6 +203,16 @@ def delete_fight_record(
         branch_id=student.branch_id,
     )
 
+    old_student_id = record.student_id
+    old_record_type = record.record_type
+
     record.deleted_at = datetime.utcnow()
+    db.flush()
+
+    sync_student_fight_totals_after_soft_delete(
+        db,
+        student_id=old_student_id,
+        old_record_type=old_record_type,
+    )
     db.commit()
     return MessageResponse(message="Registro deportivo eliminado")
