@@ -2,10 +2,18 @@
 -- Migration: Tabla student_fight_records (registros individuales de peleas)
 -- Fecha: 2026-08-07
 -- Cada alumno puede tener N peleas, cada una con tipo, rival y fecha
+--
+-- IMPORTANTE: SET SESSION al inicio para evitar ERROR 1419 en entornos
+-- con binary logging (RDS, Cloud SQL, réplicas) donde el usuario no tiene SUPER.
+-- Esto sólo afecta la sesión actual del SOURCE, NO el servidor globalmente.
 -- ============================================================
 
+-- Habilita creación de triggers/programas almacenados sin privilegio SUPER.
+-- (Sólo válido para esta conexión / SOURCE. No requiere DBA.)
+SET SESSION log_bin_trust_function_creators = 1;
+
 -- -----------------------------------------------------------
--- 1. Tabla student_fight_records
+-- 1. Tabla student_fight_records (índices inline = idempotente)
 -- -----------------------------------------------------------
 CREATE TABLE IF NOT EXISTS student_fight_records (
     id              INT AUTO_INCREMENT PRIMARY KEY,
@@ -23,23 +31,22 @@ CREATE TABLE IF NOT EXISTS student_fight_records (
         ON UPDATE CASCADE,
 
     CONSTRAINT chk_student_fight_records_opponent_not_empty
-        CHECK (CHAR_LENGTH(TRIM(opponent_name)) > 0)
+        CHECK (CHAR_LENGTH(TRIM(opponent_name)) > 0),
+
+    -- Índices declarados inline → al re-ejecutar con IF NOT EXISTS no hay
+    -- errores de "duplicate key name" (a diferencia de ALTER TABLE ADD INDEX).
+    INDEX ix_student_fight_records_student       (student_id),
+    INDEX ix_student_fight_records_date          (fight_date),
+    INDEX ix_student_fight_records_type          (record_type),
+    INDEX ix_student_fight_records_student_date  (student_id, fight_date)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- -----------------------------------------------------------
--- 2. Indices
--- -----------------------------------------------------------
-ALTER TABLE student_fight_records
-    ADD INDEX ix_student_fight_records_student   (student_id),
-    ADD INDEX ix_student_fight_records_date      (fight_date),
-    ADD INDEX ix_student_fight_records_type      (record_type),
-    ADD INDEX ix_student_fight_records_student_date (student_id, fight_date);
-
--- -----------------------------------------------------------
--- 3. Trigger para mantener sincronizados los totales
+-- 2. Trigger para mantener sincronizados los totales
 --    rd_victorias / rd_empates / rd_derrotas en students
 --    al INSERTAR un nuevo registro
 -- -----------------------------------------------------------
+DROP TRIGGER IF EXISTS trg_student_fight_records_after_insert;
 DELIMITER //
 CREATE TRIGGER trg_student_fight_records_after_insert
 AFTER INSERT ON student_fight_records
@@ -57,8 +64,9 @@ END //
 DELIMITER ;
 
 -- -----------------------------------------------------------
--- 4. Trigger al ACTUALIZAR un registro (cambio de tipo o de alumno)
+-- 3. Trigger al ACTUALIZAR un registro (cambio de tipo o de alumno)
 -- -----------------------------------------------------------
+DROP TRIGGER IF EXISTS trg_student_fight_records_after_update;
 DELIMITER //
 CREATE TRIGGER trg_student_fight_records_after_update
 AFTER UPDATE ON student_fight_records
@@ -87,8 +95,9 @@ END //
 DELIMITER ;
 
 -- -----------------------------------------------------------
--- 5. Trigger al ELIMINAR físicamente un registro (restar del total)
+-- 4. Trigger al ELIMINAR físicamente un registro (restar del total)
 -- -----------------------------------------------------------
+DROP TRIGGER IF EXISTS trg_student_fight_records_after_delete;
 DELIMITER //
 CREATE TRIGGER trg_student_fight_records_after_delete
 AFTER DELETE ON student_fight_records
