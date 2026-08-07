@@ -20,26 +20,92 @@ from app.models.student import Student
 from app.models.teaching import MartialClass
 from app.models.user import User
 from app.schemas.common import MessageResponse
-from app.schemas.student import StudentCreate, StudentRead, StudentUpdate
+from app.schemas.student import (
+    StudentCreate,
+    StudentProfileCompleteness,
+    StudentRead,
+    StudentUpdate,
+)
 
 
 router = APIRouter(prefix="/students", tags=["students"])
 
 
-def _student_load_options():
-    return (
+def _student_load_options(*, include_details: bool = False):
+    opts = [
         selectinload(Student.current_belt_level),
         selectinload(Student.current_stripe),
+    ]
+    if include_details:
+        opts += [
+            selectinload(Student.emergency_contacts),
+            selectinload(Student.medical_record),
+            selectinload(Student.documents),
+            selectinload(Student.authorized_persons),
+        ]
+    return tuple(opts)
+
+
+def compute_profile_completeness(student: Student) -> StudentProfileCompleteness:
+    """Calcula el porcentaje/campos faltantes de la ficha de alumno."""
+    has_phone = bool(student.phone and student.phone.strip())
+    has_email = bool(student.email and student.email.strip())
+    has_emergency_contacts = bool(getattr(student, "emergency_contacts", None) and len(student.emergency_contacts) > 0)
+    mr = getattr(student, "medical_record", None)
+    has_medical_record = mr is not None and (
+        bool(mr.blood_type)
+        or bool(mr.allergies)
+        or bool(mr.previous_injuries)
+        or mr.insurance_type != "none"
+    )
+    docs = getattr(student, "documents", []) or []
+    has_liability_waiver = any(d.document_type == "liability_waiver" for d in docs)
+    has_photo_consent = any(d.document_type == "photo_consent" for d in docs)
+    aps = getattr(student, "authorized_persons", None) or []
+    is_minor = student.is_minor or False
+    has_authorized_persons_if_minor = (not is_minor) or (len([ap for ap in aps if ap.is_active]) > 0)
+
+    checks = [
+        ("phone", has_phone),
+        ("email", has_email),
+        ("emergency_contacts", has_emergency_contacts),
+        ("medical_record", has_medical_record),
+        ("liability_waiver", has_liability_waiver),
+        ("photo_consent", has_photo_consent),
+    ]
+    if is_minor:
+        checks.append(("authorized_persons", has_authorized_persons_if_minor))
+
+    missing_fields = [name for name, ok in checks if not ok]
+    filled_fields = len(checks) - len(missing_fields)
+    return StudentProfileCompleteness(
+        is_complete=len(missing_fields) == 0,
+        total_fields=len(checks),
+        filled_fields=filled_fields,
+        missing_fields=missing_fields,
+        has_phone=has_phone,
+        has_email=has_email,
+        has_emergency_contacts=has_emergency_contacts,
+        has_medical_record=has_medical_record,
+        has_liability_waiver=has_liability_waiver,
+        has_photo_consent=has_photo_consent,
+        has_authorized_persons_if_minor=has_authorized_persons_if_minor,
     )
 
 
-def get_student_or_404(db: Session, student_id: int) -> Student:
+def attach_completeness(student: Student) -> Student:
+    """Adjunta el atributo dinámico profile_completeness al modelo ORM."""
+    object.__setattr__(student, "profile_completeness", compute_profile_completeness(student))
+    return student
+
+
+def get_student_or_404(db: Session, student_id: int, *, include_details: bool = False) -> Student:
     """Obtiene un alumno existente o corta con 404."""
 
     student = db.scalar(
         select(Student)
         .where(Student.id == student_id)
-        .options(*_student_load_options())
+        .options(*_student_load_options(include_details=include_details))
     )
     if student is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Alumno no encontrado")
@@ -188,9 +254,10 @@ def create_student(
     refreshed = db.scalar(
         select(Student)
         .where(Student.id == student.id)
-        .options(*_student_load_options())
+        .options(*_student_load_options(include_details=True))
     )
-    return refreshed or student
+    result = refreshed or student
+    return attach_completeness(result)
 
 
 @router.get("", response_model=list[StudentRead])
@@ -198,8 +265,10 @@ def list_students(
     organization_id: int | None = Query(default=None, gt=0),
     branch_id: int | None = Query(default=None, gt=0),
     status_filter: StudentStatus | None = Query(default=None, alias="status"),
+    incomplete_only: bool = Query(default=False),
     search: str | None = Query(default=None, min_length=1, max_length=100),
     include_deleted: bool = False,
+    include_completeness: bool = Query(default=True),
     db: Session = Depends(get_db),
     current_user: User = Depends(require_active_user),
 ) -> list[Student]:
@@ -210,9 +279,10 @@ def list_students(
         organization_id=organization_id,
         branch_id=branch_id,
     )
+    load_details = include_completeness or incomplete_only
     query = (
         select(Student)
-        .options(*_student_load_options())
+        .options(*_student_load_options(include_details=load_details))
         .order_by(Student.id)
     )
 
@@ -233,19 +303,29 @@ def list_students(
     if not include_deleted:
         query = query.where(Student.deleted_at.is_(None))
 
-    return list(db.scalars(query).unique().all())
+    students = list(db.scalars(query).unique().all())
+    if include_completeness or incomplete_only:
+        processed: list[Student] = []
+        for s in students:
+            attach_completeness(s)
+            if incomplete_only and s.profile_completeness and s.profile_completeness.is_complete:
+                continue
+            processed.append(s)
+        return processed
+    return students
 
 
 @router.get("/{student_id}", response_model=StudentRead)
 def get_student(
     student_id: int,
     include_deleted: bool = False,
+    include_details: bool = Query(default=True),
     db: Session = Depends(get_db),
     current_user: User = Depends(require_active_user),
 ) -> Student:
-    """Devuelve un alumno por su id."""
+    """Devuelve un alumno por su id, opcionalmente con detalle médico/documentos."""
 
-    student = get_student_or_404(db, student_id)
+    student = get_student_or_404(db, student_id, include_details=include_details)
     ensure_can_access_operational_scope(
         current_user,
         organization_id=student.organization_id,
@@ -253,7 +333,26 @@ def get_student(
     )
     if student.deleted_at is not None and not include_deleted:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Alumno no encontrado")
+    if include_details:
+        attach_completeness(student)
     return student
+
+
+@router.get("/{student_id}/profile-completeness", response_model=StudentProfileCompleteness)
+def get_student_profile_completeness(
+    student_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_active_user),
+) -> StudentProfileCompleteness:
+    """Devuelve el diagnóstico de completitud de la ficha del alumno."""
+
+    student = get_student_or_404(db, student_id, include_details=True)
+    ensure_can_access_operational_scope(
+        current_user,
+        organization_id=student.organization_id,
+        branch_id=student.branch_id,
+    )
+    return compute_profile_completeness(student)
 
 
 @router.patch("/{student_id}", response_model=StudentRead)
@@ -306,9 +405,10 @@ def update_student(
     refreshed = db.scalar(
         select(Student)
         .where(Student.id == student.id)
-        .options(*_student_load_options())
+        .options(*_student_load_options(include_details=True))
     )
-    return refreshed or student
+    result = refreshed or student
+    return attach_completeness(result)
 
 
 @router.delete("/{student_id}", response_model=MessageResponse)
@@ -329,3 +429,173 @@ def delete_student(
     student.status = StudentStatus.INACTIVE
     db.commit()
     return MessageResponse(message="Alumno eliminado lógicamente")
+
+
+# ======================== Sub-recursos ========================
+# Rutas anidadas: /students/{student_id}/emergency-contacts
+#                /students/{student_id}/medical-record
+#                /students/{student_id}/documents
+#                /students/{student_id}/authorized-persons
+
+
+@router.get("/{student_id}/emergency-contacts", response_model=list)
+def list_student_emergency_contacts(
+    student_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_active_user),
+):
+    from app.models.emergency_contact import EmergencyContact
+    from app.schemas.emergency_contact import EmergencyContactRead
+
+    student = get_student_or_404(db, student_id)
+    ensure_can_access_operational_scope(current_user, organization_id=student.organization_id, branch_id=student.branch_id)
+    items = db.scalars(
+        select(EmergencyContact)
+        .where(EmergencyContact.student_id == student_id, EmergencyContact.deleted_at.is_(None))
+        .order_by(EmergencyContact.priority, EmergencyContact.id)
+    ).all()
+    return [EmergencyContactRead.model_validate(i) for i in items]
+
+
+@router.post("/{student_id}/emergency-contacts", response_model=None, status_code=201)
+def create_student_emergency_contact(
+    student_id: int,
+    payload: dict,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_active_user),
+):
+    from app.models.emergency_contact import EmergencyContact
+    from app.schemas.emergency_contact import EmergencyContactCreate, EmergencyContactRead
+
+    student = get_student_or_404(db, student_id)
+    ensure_can_access_operational_scope(current_user, organization_id=student.organization_id, branch_id=student.branch_id)
+    create = EmergencyContactCreate(student_id=student_id, organization_id=student.organization_id, **payload)
+    obj = EmergencyContact(**create.model_dump())
+    db.add(obj)
+    db.commit()
+    db.refresh(obj)
+    return EmergencyContactRead.model_validate(obj)
+
+
+@router.get("/{student_id}/medical-record", response_model=None)
+def get_student_medical_record(
+    student_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_active_user),
+):
+    from app.models.medical_record import MedicalRecord
+    from app.schemas.medical_record import MedicalRecordRead
+
+    student = get_student_or_404(db, student_id)
+    ensure_can_access_operational_scope(current_user, organization_id=student.organization_id, branch_id=student.branch_id)
+    obj = db.scalar(
+        select(MedicalRecord).where(MedicalRecord.student_id == student_id, MedicalRecord.deleted_at.is_(None))
+    )
+    return MedicalRecordRead.model_validate(obj) if obj else None
+
+
+@router.put("/{student_id}/medical-record", response_model=None)
+def upsert_student_medical_record(
+    student_id: int,
+    payload: dict,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_active_user),
+):
+    from app.models.medical_record import MedicalRecord
+    from app.schemas.medical_record import MedicalRecordCreate, MedicalRecordRead
+
+    student = get_student_or_404(db, student_id)
+    ensure_can_access_operational_scope(current_user, organization_id=student.organization_id, branch_id=student.branch_id)
+    existing = db.scalar(
+        select(MedicalRecord).where(MedicalRecord.student_id == student_id, MedicalRecord.deleted_at.is_(None))
+    )
+    if existing is None:
+        create = MedicalRecordCreate(student_id=student_id, organization_id=student.organization_id, **payload)
+        obj = MedicalRecord(**create.model_dump())
+        db.add(obj)
+    else:
+        for key, value in payload.items():
+            if hasattr(existing, key):
+                setattr(existing, key, value)
+        obj = existing
+    db.commit()
+    db.refresh(obj)
+    return MedicalRecordRead.model_validate(obj)
+
+
+@router.get("/{student_id}/documents", response_model=list)
+def list_student_documents(
+    student_id: int,
+    document_type: str | None = Query(default=None),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_active_user),
+):
+    from app.models.student_document import StudentDocument
+    from app.schemas.student_document import StudentDocumentRead
+
+    student = get_student_or_404(db, student_id)
+    ensure_can_access_operational_scope(current_user, organization_id=student.organization_id, branch_id=student.branch_id)
+    query = select(StudentDocument).where(StudentDocument.student_id == student_id, StudentDocument.deleted_at.is_(None))
+    if document_type:
+        query = query.where(StudentDocument.document_type == document_type)
+    items = db.scalars(query.order_by(StudentDocument.created_at.desc())).all()
+    return [StudentDocumentRead.model_validate(i) for i in items]
+
+
+@router.post("/{student_id}/documents", response_model=None, status_code=201)
+def create_student_document(
+    student_id: int,
+    payload: dict,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_active_user),
+):
+    from app.models.student_document import StudentDocument
+    from app.schemas.student_document import StudentDocumentCreate, StudentDocumentRead
+
+    student = get_student_or_404(db, student_id)
+    ensure_can_access_operational_scope(current_user, organization_id=student.organization_id, branch_id=student.branch_id)
+    create = StudentDocumentCreate(student_id=student_id, organization_id=student.organization_id, **payload)
+    obj = StudentDocument(**create.model_dump())
+    db.add(obj)
+    db.commit()
+    db.refresh(obj)
+    return StudentDocumentRead.model_validate(obj)
+
+
+@router.get("/{student_id}/authorized-persons", response_model=list)
+def list_student_authorized_persons(
+    student_id: int,
+    only_active: bool = Query(default=True),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_active_user),
+):
+    from app.models.authorized_person import AuthorizedPerson
+    from app.schemas.authorized_person import AuthorizedPersonRead
+
+    student = get_student_or_404(db, student_id)
+    ensure_can_access_operational_scope(current_user, organization_id=student.organization_id, branch_id=student.branch_id)
+    query = select(AuthorizedPerson).where(AuthorizedPerson.student_id == student_id, AuthorizedPerson.deleted_at.is_(None))
+    if only_active:
+        query = query.where(AuthorizedPerson.is_active == True)
+    items = db.scalars(query.order_by(AuthorizedPerson.full_name)).all()
+    return [AuthorizedPersonRead.model_validate(i) for i in items]
+
+
+@router.post("/{student_id}/authorized-persons", response_model=None, status_code=201)
+def create_student_authorized_person(
+    student_id: int,
+    payload: dict,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_active_user),
+):
+    from app.models.authorized_person import AuthorizedPerson
+    from app.schemas.authorized_person import AuthorizedPersonCreate, AuthorizedPersonRead
+
+    student = get_student_or_404(db, student_id)
+    ensure_can_access_operational_scope(current_user, organization_id=student.organization_id, branch_id=student.branch_id)
+    create = AuthorizedPersonCreate(student_id=student_id, organization_id=student.organization_id, **payload)
+    obj = AuthorizedPerson(**create.model_dump())
+    db.add(obj)
+    db.commit()
+    db.refresh(obj)
+    return AuthorizedPersonRead.model_validate(obj)

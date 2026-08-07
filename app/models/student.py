@@ -63,6 +63,9 @@ class Student(Base):
     )
     guardian_name: Mapped[str | None] = mapped_column(String(150), nullable=True)
     guardian_phone: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    phone: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    email: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    is_minor: Mapped[bool] = mapped_column(nullable=False, server_default=text("0"))
     notes: Mapped[str | None] = mapped_column(Text(), nullable=True)
     rd_victorias: Mapped[int] = mapped_column(nullable=False, server_default=text("0"))
     rd_empates: Mapped[int] = mapped_column(nullable=False, server_default=text("0"))
@@ -100,4 +103,29 @@ class Student(Base):
         back_populates="student",
         cascade="all, delete-orphan",
         primaryjoin="and_(StudentFightRecord.student_id==Student.id, StudentFightRecord.deleted_at.is_(None))",
+    )
+    emergency_contacts = relationship(
+        "EmergencyContact",
+        back_populates="student",
+        cascade="all, delete-orphan",
+        primaryjoin="and_(EmergencyContact.student_id==Student.id, EmergencyContact.deleted_at.is_(None))",
+    )
+    medical_record = relationship(
+        "MedicalRecord",
+        back_populates="student",
+        uselist=False,
+        cascade="all, delete-orphan",
+        primaryjoin="and_(MedicalRecord.student_id==Student.id, MedicalRecord.deleted_at.is_(None))",
+    )
+    documents = relationship(
+        "StudentDocument",
+        back_populates="student",
+        cascade="all, delete-orphan",
+        primaryjoin="and_(StudentDocument.student_id==Student.id, StudentDocument.deleted_at.is_(None))",
+    )
+    authorized_persons = relationship(
+        "AuthorizedPerson",
+        back_populates="student",
+        cascade="all, delete-orphan",
+        primaryjoin="and_(AuthorizedPerson.student_id==Student.id, AuthorizedPerson.deleted_at.is_(None))",
     )

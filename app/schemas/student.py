@@ -8,7 +8,11 @@ from decimal import Decimal
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl, field_validator, model_validator
 
 from app.models.enums import PaymentStatus, StudentStatus
+from app.schemas.authorized_person import AuthorizedPersonRead
 from app.schemas.belt import BeltLevelSummary, BeltStripeSummary
+from app.schemas.emergency_contact import EmergencyContactRead
+from app.schemas.medical_record import MedicalRecordRead
+from app.schemas.student_document import StudentDocumentRead
 
 
 class StudentBase(BaseModel):
@@ -34,6 +38,9 @@ class StudentBase(BaseModel):
     status: StudentStatus = StudentStatus.ACTIVE
     guardian_name: str | None = Field(default=None, max_length=150)
     guardian_phone: str | None = Field(default=None, max_length=50)
+    phone: str | None = Field(default=None, max_length=50)
+    email: str | None = Field(default=None, max_length=255)
+    is_minor: bool = False
     notes: str | None = None
     rd_victorias: int = Field(default=0, ge=0)
     rd_empates: int = Field(default=0, ge=0)
@@ -45,6 +52,13 @@ class StudentBase(BaseModel):
         """Normaliza la moneda a ISO 4217 en mayúsculas."""
 
         return value.strip().upper()
+
+    @field_validator("email")
+    @classmethod
+    def normalize_email(cls, value: str | None) -> str | None:
+        if value is None or not value.strip():
+            return None
+        return value.strip().lower()
 
     @model_validator(mode="after")
     def validate_payment_fields(self) -> "StudentBase":
@@ -82,6 +96,9 @@ class StudentUpdate(BaseModel):
     status: StudentStatus | None = None
     guardian_name: str | None = Field(default=None, max_length=150)
     guardian_phone: str | None = Field(default=None, max_length=50)
+    phone: str | None = Field(default=None, max_length=50)
+    email: str | None = Field(default=None, max_length=255)
+    is_minor: bool | None = None
     notes: str | None = None
     rd_victorias: int | None = Field(default=None, ge=0)
     rd_empates: int | None = Field(default=None, ge=0)
@@ -95,6 +112,13 @@ class StudentUpdate(BaseModel):
         if value is None:
             return value
         return value.strip().upper()
+
+    @field_validator("email")
+    @classmethod
+    def normalize_email(cls, value: str | None) -> str | None:
+        if value is None or not value.strip():
+            return None
+        return value.strip().lower()
 
 
 class StudentRead(BaseModel):
@@ -124,6 +148,9 @@ class StudentRead(BaseModel):
     status: StudentStatus
     guardian_name: str | None
     guardian_phone: str | None
+    phone: str | None
+    email: str | None
+    is_minor: bool
     notes: str | None
     rd_victorias: int
     rd_empates: int
@@ -133,3 +160,24 @@ class StudentRead(BaseModel):
     deleted_at: datetime | None
     current_belt_level: BeltLevelSummary | None = None
     current_stripe: BeltStripeSummary | None = None
+    emergency_contacts: list[EmergencyContactRead] | None = None
+    medical_record: MedicalRecordRead | None = None
+    documents: list[StudentDocumentRead] | None = None
+    authorized_persons: list[AuthorizedPersonRead] | None = None
+    profile_completeness: "StudentProfileCompleteness | None" = None
+
+
+class StudentProfileCompleteness(BaseModel):
+    """Diagnóstico de campos faltantes (para mostrar en dashboard)."""
+
+    is_complete: bool
+    total_fields: int
+    filled_fields: int
+    missing_fields: list[str]
+    has_phone: bool
+    has_email: bool
+    has_emergency_contacts: bool
+    has_medical_record: bool
+    has_liability_waiver: bool
+    has_photo_consent: bool
+    has_authorized_persons_if_minor: bool
