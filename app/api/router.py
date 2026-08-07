@@ -19,6 +19,7 @@ from app.api.routes.organizations import router as organizations_router
 from app.api.routes.payments import router as payments_router
 from app.api.routes.public_attendance import router as public_attendance_router
 from app.api.routes.students import router as students_router
+from app.api.routes.trajectory import router as trajectory_router
 from app.api.routes.users import router as users_router
 
 
@@ -37,4 +38,5 @@ api_router.include_router(class_enrollments_router, dependencies=[Depends(requir
 api_router.include_router(attendance_router, dependencies=[Depends(require_active_user)])
 api_router.include_router(belts_router, dependencies=[Depends(require_active_user)])
 api_router.include_router(students_router, dependencies=[Depends(require_active_user)])
+api_router.include_router(trajectory_router, dependencies=[Depends(require_active_user)])
 api_router.include_router(payments_router, dependencies=[Depends(require_active_user)])

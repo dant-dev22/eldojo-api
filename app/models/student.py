@@ -86,3 +86,9 @@ class Student(Base):
     attendance_records = relationship("Attendance", back_populates="student")
     payments = relationship("Payment", back_populates="student")
     belt_histories = relationship("StudentBeltHistory", back_populates="student", cascade="all, delete-orphan")
+    trajectory_events = relationship(
+        "TrajectoryEvent",
+        back_populates="student",
+        cascade="all, delete-orphan",
+        primaryjoin="and_(TrajectoryEvent.student_id==Student.id, TrajectoryEvent.deleted_at.is_(None))",
+    )
