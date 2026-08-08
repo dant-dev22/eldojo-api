@@ -39,6 +39,7 @@ class Settings:
     app_env: str = os.getenv("APP_ENV", "development")
     app_debug: bool = as_bool(os.getenv("APP_DEBUG"), default=True)
     api_v1_prefix: str = os.getenv("API_V1_PREFIX", "/api/v1")
+    app_version: str = os.getenv("APP_VERSION", "1.0.0")
     database_url: str = os.getenv(
         "DATABASE_URL",
         "mysql+pymysql://eldojo_app:N7_xK9mP2_vQ@127.0.0.1:3306/eldojo_db",

@@ -40,10 +40,27 @@ app.include_router(api_router, prefix=settings.api_v1_prefix)
 
 @app.get("/", tags=["root"])
 def root() -> dict[str, str]:
-    """Entrada simple para verificar que el servicio arrancó."""
+    """Entrada simple para verificar que el servicio arranco."""
 
     return {
         "message": f"{settings.app_name} operativo",
         "docs": "/docs",
         "health": f"{settings.api_v1_prefix}/health",
+        "version": f"{settings.api_v1_prefix}/version",
+    }
+
+
+@app.get("/version", tags=["root"])
+@app.get("/api/v1/version", tags=["health"])
+def version() -> dict[str, str]:
+    """Version del backend y informacion de deploy.
+
+    El frontend usa este endpoint (y tambien version.json estatico) para
+    detectar si hay una nueva version desplegada y forzar reload.
+    """
+
+    return {
+        "version": settings.app_version,
+        "backend_version": settings.app_version,
+        "environment": settings.app_env,
     }
