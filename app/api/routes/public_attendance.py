@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import re
 import unicodedata
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import select
+from fastapi import APIRouter, Depends, Header, HTTPException, status
+from sqlalchemy import and_, func, select
 from sqlalchemy.orm import Session, selectinload
 
 from app.db.session import get_db
@@ -166,8 +166,15 @@ def create_public_attendance(
     branch_slug: str,
     payload: PublicAttendanceCreate,
     db: Session = Depends(get_db),
+    x_attendance_source: str | None = Header(default=None, alias="X-Attendance-Source"),
 ) -> PublicAttendanceResult:
-    """Registra una asistencia desde una interfaz pública manual."""
+    """Registra una asistencia desde una interfaz pública (manual o escaneo QR).
+
+    - Envía el header `X-Attendance-Source: qr` cuando el registro proviene de un escaneo QR.
+      El método de asistencia se almacenará como `qr` en lugar de `manual`.
+    - Previene doble check-in para el mismo alumno dentro de una ventana de 8 horas
+      respondiendo 201 OK con el registro existente sin crear duplicados.
+    """
 
     organization, branch = resolve_public_scope(db, organization_slug, branch_slug)
     student = resolve_student_for_public_id(db, branch, payload.student_id)
@@ -186,12 +193,46 @@ def create_public_attendance(
                 detail="La clase no pertenece a la sucursal seleccionada",
             )
 
+    normalized_source = (x_attendance_source or "").strip().lower()
+    resolved_method = AttendanceMethod.QR if normalized_source == "qr" else AttendanceMethod.MANUAL
+
+    now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
+    duplicate_window_start = now_utc - timedelta(hours=8)
+
+    existing_attendance = db.scalar(
+        select(Attendance).where(
+            and_(
+                Attendance.student_id == student.id,
+                Attendance.branch_id == branch.id,
+                Attendance.check_in_at >= duplicate_window_start,
+                Attendance.check_in_at <= now_utc,
+            )
+        )
+    )
+
+    if existing_attendance is not None:
+        existing_class_name = None
+        if existing_attendance.class_id is not None:
+            existing_class = db.get(MartialClass, existing_attendance.class_id)
+            if existing_class is not None:
+                existing_class_name = existing_class.name
+        student_name = f"{student.first_name} {student.last_name}".strip()
+        return PublicAttendanceResult(
+            message="Asistencia ya registrada para esta sesion.",
+            attendance_id=existing_attendance.id,
+            student_id=student.id,
+            student_name=student_name,
+            class_id=existing_attendance.class_id,
+            class_name=existing_class_name,
+            check_in_at=existing_attendance.check_in_at,
+        )
+
     attendance = Attendance(
         student_id=student.id,
         class_id=payload.class_id,
         branch_id=branch.id,
-        check_in_at=datetime.now(timezone.utc).replace(tzinfo=None),
-        method=AttendanceMethod.MANUAL,
+        check_in_at=now_utc,
+        method=resolved_method,
         registered_by=None,
     )
     db.add(attendance)
@@ -199,8 +240,13 @@ def create_public_attendance(
     db.refresh(attendance)
 
     student_name = f"{student.first_name} {student.last_name}".strip()
+    success_message = (
+        "Asistencia registrada via QR."
+        if resolved_method == AttendanceMethod.QR
+        else "Tu asistencia ha sido registrada."
+    )
     return PublicAttendanceResult(
-        message="Tu asistencia ha sido registrada.",
+        message=success_message,
         attendance_id=attendance.id,
         student_id=student.id,
         student_name=student_name,

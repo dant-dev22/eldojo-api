@@ -1,4 +1,5 @@
 fastapi<1.0,>=0.115
+gunicorn<24.0,>=23.0
 uvicorn[standard]<1.0,>=0.30
 SQLAlchemy<3.0,>=2.0
 PyMySQL<2.0,>=1.1
