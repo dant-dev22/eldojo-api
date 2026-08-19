@@ -2,6 +2,84 @@
 
 Backend inicial en FastAPI para conectarse a la base de datos de `eldojo`.
 
+## Local Set Up
+
+> Terminal recomendada: **Git Bash** (bash / MSYS2). Todos los comandos usan `make` que se incluye por defecto en Git Bash for Windows.
+
+Este repositorio orquesta TODO el stack local (MySQL via Docker + Alembic + migraciones manuales + seeds) desde un solo Makefile. El Makefile referencia automáticamente el repo hermano `../eldojo` para el `docker-compose.local.yml` y las migraciones Alembic.
+
+### Prerrequisitos
+- Docker Desktop (o Docker Engine) corriendo localmente
+- Python 3.10+
+- make (disponible en Git Bash)
+
+### Paso 1: Configurar variables de entorno
+```bash
+cp .env.example .env
+```
+
+Edita `.env` y asegúrate que `DATABASE_URL` use el puerto **3307** y la contraseña que coincide con `docker-compose.local.yml`:
+```env
+DATABASE_URL=mysql+pymysql://eldojo_app:Localpass_1234@127.0.0.1:3307/eldojo_db
+```
+
+Los demás valores del `.env.example` ya vienen pre-configurados para desarrollo local (CORS incluye `localhost:8081` y `localhost:19006` para Expo).
+
+### Paso 2: Instalar dependencias
+```bash
+make install
+```
+
+Esto crea `.venv` si no existe, actualiza pip, instala el proyecto en modo editable y crea la carpeta `uploads/`.
+
+### Paso 3: Resetear y popular la base de datos (TODO en uno)
+```bash
+make db-reset
+```
+
+Este comando hace lo siguiente, en orden:
+1. `db-teardown` — borra el contenedor MySQL y su volumen (si existe)
+2. Levanta MySQL via `docker compose -f ../eldojo/docker-compose.local.yml up -d`
+3. Espera hasta 90s que el healthcheck de MySQL quede `healthy`
+4. `db-migrate` — ejecuta `alembic upgrade head` en el repo `eldojo` + las **10 migraciones SQL manuales** (idempotentes)
+5. `db-seed` — carga el seed maestro (organización, usuario admin, belts) + **6 seeds demo** (40 alumnos, clases, pagos, asistencia)
+
+Listo — tenés la DB lista con datos reales para probar.
+
+### Paso 4: Levantar la API
+```bash
+make start
+```
+
+Levanta Uvicorn con `--reload` en `0.0.0.0:8000`.
+
+La API queda disponible en:
+- Swagger docs: `http://127.0.0.1:8000/docs`
+- Redoc: `http://127.0.0.1:8000/redoc`
+- Health check: `http://127.0.0.1:8000/api/v1/health`
+- Health DB: `http://127.0.0.1:8000/api/v1/health/db`
+
+### Comandos make útiles
+```bash
+make help              # lista todos los comandos
+make db-status         # estado del contenedor mysql (docker compose ps)
+make db-teardown       # borra el contenedor + volumen mysql
+make db-migrate        # aplica alembic head + 10 migraciones manuales
+make db-seed           # carga seed maestro + 6 seeds demo
+make health            # GET /api/v1/health via curl
+make db-check          # GET /api/v1/health/db via curl
+make lint-check        # py_compile en app/ para chequeo sintáctico
+make clean             # borra __pycache__ y *.pyc
+```
+
+### Usuario admin demo
+```text
+email: dantedev22@gmail.com
+password: d4nt3r4d
+```
+
+---
+
 ## Qué incluye
 
 - FastAPI base

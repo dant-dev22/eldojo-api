@@ -126,17 +126,8 @@ db-seed:
 db-reset: db-teardown
 	@echo "[eldojo-api-db] recreating local mysql container from docker-compose.local.yml ..."
 	@$(INFRA_COMPOSE) up -d
-	@echo "[eldojo-api-db] waiting for MySQL healthy (poll  [max 90s] ..."
-	@$(VENV_PY) -c "import subprocess,time,sys; deadline=time.time()+90; last=''; \
-		while time.time()<deadline: \
-		  try: \
-		    out=subprocess.check_output(['docker','inspect','--format','{{json .State.Health.Status}}','eldojo-mysql-local'],text=True).strip().strip('\"'); \
-		    sys.stdout.write(f\"  status=%s\n\" % out); sys.stdout.flush(); \
-		    if out=='healthy': break; \
-		  except Exception: pass; \
-		  time.sleep(2); \
-		if out!='healthy': sys.stderr.write('[TIMEOUT mysql not healthy after 90s\n'); sys.exit(1); \
-		print('  mysql healthy OK');"
+	@echo "[eldojo-api-db] waiting for MySQL healthy (poll [max 90s] ..."
+	@"$(VENV_PY)" "$(PROJECT_ROOT)scripts_wait_mysql_healthy.py"
 	@$(MAKE) --no-print-directory db-migrate
 	@$(MAKE) --no-print-directory db-seed
 	@echo "[eldojo-api-db] reset complete. Run 'make start' to run the API server."
