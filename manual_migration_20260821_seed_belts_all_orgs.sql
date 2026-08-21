@@ -21,7 +21,7 @@ BEGIN
   DECLARE v_org_name VARCHAR(255);
 
   DECLARE org_cursor CURSOR FOR
-    SELECT id, name FROM organizations WHERE deleted_at IS NULL OR deleted_at IS NULL ORDER BY id;
+    SELECT id, name FROM organizations WHERE is_active = 1 ORDER BY id;
   DECLARE CONTINUE HANDLER FOR NOT FOUND SET done = TRUE;
 
   OPEN org_cursor;
@@ -244,7 +244,7 @@ SELECT
 FROM organizations o
 LEFT JOIN belt_levels bl ON bl.organization_id = o.id
 LEFT JOIN belt_stripes bs ON bs.belt_level_id = bl.id
-WHERE o.deleted_at IS NULL OR o.deleted_at IS NULL
+WHERE o.is_active = 1
 GROUP BY o.id, o.name ORDER BY o.id;
 
 SELECT 'Estado alumnos:' AS info;
@@ -257,7 +257,7 @@ SELECT
   SUM(CASE WHEN s.current_belt_level_id IS NULL THEN 1 ELSE 0 END) AS sin_cinta
 FROM organizations o
 LEFT JOIN students s ON s.organization_id = o.id
-WHERE o.deleted_at IS NULL OR o.deleted_at IS NULL
+WHERE o.is_active = 1
 GROUP BY o.id, o.name ORDER BY o.id;
 
 DROP PROCEDURE IF EXISTS seed_belts_for_all_orgs;
