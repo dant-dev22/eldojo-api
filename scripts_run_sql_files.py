@@ -41,11 +41,13 @@ def split_statements(sql: str) -> list[str]:
     in_backtick = False
     in_line_comment = False
     in_block_comment = False
+    delimiter = ";"
     i = 0
     sql = sql.replace("\r\n", "\n")
-    while i < len(sql):
+    n = len(sql)
+    while i < n:
         ch = sql[i]
-        nxt = sql[i + 1] if i + 1 < len(sql) else ""
+        nxt = sql[i + 1] if i + 1 < n else ""
 
         if in_line_comment:
             if ch == "\n":
@@ -61,6 +63,37 @@ def split_statements(sql: str) -> list[str]:
             continue
 
         if not in_single and not in_double and not in_backtick:
+            # Detect DELIMITER command at the start of a logical line (after optional whitespace)
+            if ch.isspace() or i == 0:
+                # Find end of whitespace / start of line
+                if i == 0 or ch == "\n":
+                    scan_start = i if i == 0 else i + 1
+                    while scan_start < n and sql[scan_start] in " \t":
+                        scan_start += 1
+                    if sql[scan_start:scan_start + 9].upper() == "DELIMITER" and (
+                        scan_start + 9 >= n or sql[scan_start + 9] in " \t"
+                    ):
+                        # Consume whitespace after DELIMITER
+                        j = scan_start + 9
+                        while j < n and sql[j] in " \t":
+                            j += 1
+                        # Read delimiter until whitespace/newline
+                        k = j
+                        while k < n and sql[k] not in " \t\n":
+                            k += 1
+                        new_delim = sql[j:k]
+                        if new_delim:
+                            delimiter = new_delim
+                        # skip to end of line
+                        while k < n and sql[k] != "\n":
+                            k += 1
+                        i = k
+                        # discard buffered whitespace for this logical line
+                        buf = [c for c in buf if c != "\n"] if buf and all(c in " \t\n" for c in buf) else buf
+                        if buf and all(c in " \t" for c in buf):
+                            buf = []
+                        continue
+
             if ch == "-" and nxt == "-":
                 in_line_comment = True
                 i += 2
@@ -71,7 +104,6 @@ def split_statements(sql: str) -> list[str]:
                 continue
 
         if ch == "'" and not in_double and not in_backtick:
-            # Escapado con doble comilla o backslash
             if in_single and nxt == "'":
                 buf.append(ch)
                 buf.append(nxt)
@@ -97,13 +129,16 @@ def split_statements(sql: str) -> list[str]:
             i += 1
             continue
 
-        if ch == ";" and not in_single and not in_double and not in_backtick:
-            stmt = "".join(buf).strip()
-            if stmt:
-                out.append(stmt)
-            buf = []
-            i += 1
-            continue
+        # Statement terminator — match delimiter (can be multi-char, e.g. "$$")
+        if not in_single and not in_double and not in_backtick and delimiter:
+            dlen = len(delimiter)
+            if sql[i:i + dlen] == delimiter:
+                stmt = "".join(buf).strip()
+                if stmt:
+                    out.append(stmt)
+                buf = []
+                i += dlen
+                continue
 
         buf.append(ch)
         i += 1
@@ -153,11 +188,22 @@ def main() -> int:
         print("mode must be 'migration' or 'seed'")
         return 2
     files = [Path(p) for p in sys.argv[3:]]
+    existing = []
+    missing = []
     for f in files:
-        if not f.is_file():
-            print(f"missing file: {f}")
-            return 2
-    for f in files:
+        if f.is_file():
+            existing.append(f)
+        else:
+            missing.append(f)
+    if missing:
+        print(f"warning: skipping {len(missing)} missing file(s):")
+        for m in missing:
+            print(f"  - {m}")
+    if not existing:
+        print(f"warning: no existing files provided for mode='{mode}', nothing to run.")
+        return 0
+    print(f"[{mode}] running {len(existing)} existing file(s) (skipped {len(missing)} missing)...")
+    for f in existing:
         run_file(url, f, mode)
     return 0
 

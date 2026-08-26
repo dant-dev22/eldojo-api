@@ -24,3 +24,7 @@ Thumbs.db
 
 # Scripts locales
 run-local-api.sh
+
+# Migraciones manuales one-time (ejecutadas via runner idempotente; no deben trackearse)
+manual_migration_*.sql
+manual_seed_*.sql
