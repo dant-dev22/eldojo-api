@@ -298,6 +298,7 @@ def list_students(
             or_(
                 Student.first_name.like(search_term),
                 Student.last_name.like(search_term),
+                Student.unique_code.like(search_term),
             )
         )
     if not include_deleted:
