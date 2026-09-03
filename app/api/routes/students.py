@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import or_, select
@@ -19,6 +19,7 @@ from app.models.organization import Branch, Organization
 from app.models.student import Student
 from app.models.teaching import MartialClass
 from app.models.user import User
+from app.schemas.attendance import StudentAttendanceSummary
 from app.schemas.common import MessageResponse
 from app.schemas.student import (
     StudentCreate,
@@ -26,6 +27,7 @@ from app.schemas.student import (
     StudentRead,
     StudentUpdate,
 )
+from app.services.attendance_summary_service import build_student_attendance_summary
 
 
 router = APIRouter(prefix="/students", tags=["students"])
@@ -354,6 +356,32 @@ def get_student_profile_completeness(
         branch_id=student.branch_id,
     )
     return compute_profile_completeness(student)
+
+
+@router.get("/{student_id}/attendance/summary", response_model=StudentAttendanceSummary)
+def get_student_attendance_summary(
+    student_id: int,
+    class_id: int | None = Query(default=None, ge=1),
+    date_from: date | None = None,
+    date_to: date | None = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_active_user),
+) -> StudentAttendanceSummary:
+    """KPIs y agregados de asistencia para un alumno específico."""
+
+    student = get_student_or_404(db, student_id)
+    ensure_can_access_operational_scope(
+        current_user,
+        organization_id=student.organization_id,
+        branch_id=student.branch_id,
+    )
+    return build_student_attendance_summary(
+        db,
+        student,
+        class_id=class_id,
+        date_from=date_from,
+        date_to=date_to,
+    )
 
 
 @router.patch("/{student_id}", response_model=StudentRead)

@@ -199,16 +199,16 @@ def create_public_attendance(
     now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
     duplicate_window_start = now_utc - timedelta(hours=8)
 
-    existing_attendance = db.scalar(
-        select(Attendance).where(
-            and_(
-                Attendance.student_id == student.id,
-                Attendance.branch_id == branch.id,
-                Attendance.check_in_at >= duplicate_window_start,
-                Attendance.check_in_at <= now_utc,
-            )
-        )
-    )
+    duplicate_conditions = [
+        Attendance.student_id == student.id,
+        Attendance.branch_id == branch.id,
+        Attendance.check_in_at >= duplicate_window_start,
+        Attendance.check_in_at <= now_utc,
+    ]
+    if payload.class_id is not None:
+        duplicate_conditions.append(Attendance.class_id == payload.class_id)
+
+    existing_attendance = db.scalar(select(Attendance).where(and_(*duplicate_conditions)))
 
     if existing_attendance is not None:
         existing_class_name = None

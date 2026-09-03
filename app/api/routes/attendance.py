@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+from datetime import date as _date, datetime, time as _time, timedelta, timezone
+
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from app.api.dependencies import require_active_user
 from app.core.authorization import ensure_can_access_operational_scope, scope_branch_filter
@@ -80,6 +82,24 @@ def validate_attendance_links(
             )
 
 
+def _attendance_list_query_base() -> "select[Attendance]":
+    """Construye el SELECT base para listados con relaciones eager-loaded.
+
+    Centraliza el uso de selectinload para evitar duplicación entre el listado
+    general y otros endpoints que necesitan devolver AttendanceRead con
+    relaciones anidadas.
+    """
+
+    return (
+        select(Attendance)
+        .options(
+            selectinload(Attendance.class_obj).selectinload(MartialClass.discipline),
+            selectinload(Attendance.student),
+        )
+        .order_by(Attendance.check_in_at.desc(), Attendance.id.desc())
+    )
+
+
 @router.post("", response_model=AttendanceRead, status_code=status.HTTP_201_CREATED)
 def create_attendance(
     payload: AttendanceCreate,
@@ -126,29 +146,42 @@ def list_attendance(
     branch_id: int | None = Query(default=None, gt=0),
     class_id: int | None = Query(default=None, gt=0),
     method: AttendanceMethod | None = None,
+    date_from: _date | None = Query(default=None, description="Fecha mínima de check-in (inclusiva)"),
+    date_to: _date | None = Query(default=None, description="Fecha máxima de check-in (inclusiva)"),
+    limit: int = Query(default=100, ge=1, le=500, description="Cantidad máxima de registros a devolver"),
+    offset: int = Query(default=0, ge=0, description="Desplazamiento inicial para paginación"),
     db: Session = Depends(get_db),
     current_user: User = Depends(require_active_user),
 ) -> list[Attendance]:
-    """Lista asistencias con filtros básicos."""
+    """Lista asistencias con filtros básicos, paginación y relaciones anidadas."""
 
-    organization_id, branch_id = scope_branch_filter(
+    scoped_organization_id, scoped_branch_id = scope_branch_filter(
         current_user,
         organization_id=None,
         branch_id=branch_id,
     )
-    query = select(Attendance).order_by(Attendance.check_in_at.desc(), Attendance.id.desc())
-    if organization_id is not None:
-        query = query.join(Branch, Branch.id == Attendance.branch_id).where(Branch.organization_id == organization_id)
+    query = _attendance_list_query_base()
+    if scoped_organization_id is not None:
+        query = query.join(Branch, Branch.id == Attendance.branch_id).where(
+            Branch.organization_id == scoped_organization_id
+        )
 
     if student_id is not None:
         query = query.where(Attendance.student_id == student_id)
-    if branch_id is not None:
-        query = query.where(Attendance.branch_id == branch_id)
+    if scoped_branch_id is not None:
+        query = query.where(Attendance.branch_id == scoped_branch_id)
     if class_id is not None:
         query = query.where(Attendance.class_id == class_id)
     if method is not None:
         query = query.where(Attendance.method == method)
+    if date_from is not None:
+        start_dt = datetime.combine(date_from, _time.min).replace(tzinfo=None)
+        query = query.where(Attendance.check_in_at >= start_dt)
+    if date_to is not None:
+        end_dt = datetime.combine(date_to, _time.max).replace(tzinfo=None)
+        query = query.where(Attendance.check_in_at <= end_dt)
 
+    query = query.limit(limit).offset(offset)
     return list(db.scalars(query).all())
 
 
