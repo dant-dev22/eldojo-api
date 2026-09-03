@@ -83,3 +83,44 @@ class Settings:
 
 
 settings = Settings()
+
+
+def _validate_runtime_secrets() -> None:
+    """Validación de seguridad ejecutada en import-time.
+
+    Evita que un deploy de producción arrance con AUTH_SECRET_KEY por
+    defecto, lo que causaría la invalidación de TODAS las sesiones JWT
+    activas en cada restart / deploy (por rotación implícita del secret).
+    """
+
+    is_production_like = (
+        settings.app_env == "production"
+        or settings.app_debug is False
+    )
+
+    if not is_production_like:
+        return
+
+    DEFAULT_AUTH_SECRET = "change-this-in-production-eldojo"
+
+    if not settings.auth_secret_key or settings.auth_secret_key == DEFAULT_AUTH_SECRET:
+        raise RuntimeError(
+            "[FATAL] AUTH_SECRET_KEY está usando el valor por defecto o está vacía "
+            f"en un entorno de producción (APP_ENV={settings.app_env!r}, "
+            f"APP_DEBUG={settings.app_debug}). ESTO INVALIDA TODAS LAS SESIONES "
+            "CADA VEZ QUE EL BACKEND REINICIA. Configura AUTH_SECRET_KEY como "
+            "un string aleatorio permanente en tu .env de producción antes de arrancar."
+        )
+
+    if (
+        not settings.auth_issuer
+        or len(settings.auth_issuer) < 4
+        or settings.auth_issuer.isspace()
+    ):
+        raise RuntimeError(
+            "[FATAL] AUTH_ISSUER no está configurada correctamente en producción. "
+            "Sin un issuer fijo, los tokens JWT no se validan de forma estable."
+        )
+
+
+_validate_runtime_secrets()
