@@ -50,22 +50,16 @@ class Settings:
     auth_issuer: str = os.getenv("AUTH_ISSUER", "eldojo-backend-api")
     auth_access_token_expire_minutes: int = int(os.getenv("AUTH_ACCESS_TOKEN_EXPIRE_MINUTES", "120"))
     auth_refresh_token_expire_days: int = int(os.getenv("AUTH_REFRESH_TOKEN_EXPIRE_DAYS", "30"))
-    academy_verification_token_expire_hours: int = int(
-        os.getenv("ACADEMY_VERIFICATION_TOKEN_EXPIRE_HOURS", "24")
-    )
-    academy_pending_session_expire_hours: int = int(
-        os.getenv("ACADEMY_PENDING_SESSION_EXPIRE_HOURS", "24")
-    )
-    academy_verification_url_base: str = os.getenv(
-        "ACADEMY_VERIFICATION_URL_BASE",
-        "http://localhost:8081/confirmar-cuenta",
-    )
     student_invitation_token_expire_days: int = int(
         os.getenv("STUDENT_INVITATION_TOKEN_EXPIRE_DAYS", "7")
     )
     student_invitation_url_base: str = os.getenv(
         "STUDENT_INVITATION_URL_BASE",
-        "http://localhost:8081/activar",
+        "https://mi.eldojo.tech/activar",
+    )
+    academy_verification_url_base: str = os.getenv(
+        "ACADEMY_VERIFICATION_URL_BASE",
+        "https://eldojo.tech/confirmar-cuenta",
     )
     smtp_host: str | None = os.getenv("SMTP_HOST")
     smtp_port: int = int(os.getenv("SMTP_PORT", "465"))
@@ -77,12 +71,13 @@ class Settings:
         default_factory=lambda: as_list(
             os.getenv(
                 "BACKEND_CORS_ORIGINS",
-                "https://eldojo.tech,https://www.eldojo.tech,https://app.eldojo.tech,http://localhost:8081,http://127.0.0.1:8081,http://localhost:8082,http://127.0.0.1:8082,http://localhost:19006,http://127.0.0.1:19006,http://localhost:3000,http://127.0.0.1:3000",
+                "https://eldojo.tech,https://www.eldojo.tech,https://app.eldojo.tech,https://admin.eldojo.tech,https://mi.eldojo.tech,http://localhost:8081,http://127.0.0.1:8081,http://localhost:8082,http://127.0.0.1:8082,http://localhost:19006,http://127.0.0.1:19006,http://localhost:3000,http://127.0.0.1:3000",
             )
         )
     )
-    public_web_origin: str = os.getenv("PUBLIC_WEB_ORIGIN", "http://localhost:8081")
-    app_web_origin: str = os.getenv("APP_WEB_ORIGIN", "http://localhost:8082")
+    public_web_origin: str = os.getenv("PUBLIC_WEB_ORIGIN", "https://eldojo.tech")
+    app_web_origin: str = os.getenv("APP_WEB_ORIGIN", "https://app.eldojo.tech")
+    student_portal_origin: str = os.getenv("STUDENT_PORTAL_ORIGIN", "https://mi.eldojo.tech")
     session_cookie_domain: str | None = os.getenv("SESSION_COOKIE_DOMAIN")
     session_ticket_ttl_seconds: int = int(os.getenv("SESSION_TICKET_TTL_SECONDS", "30"))
     uploads_dir: Path = Path(os.getenv("UPLOADS_DIR", str(BASE_DIR / "uploads")))
