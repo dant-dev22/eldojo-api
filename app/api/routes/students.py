@@ -169,6 +169,50 @@ def attach_portal_access(db: Session, student: Student, *, latest_raw_token: str
     return student
 
 
+def _ensure_student_has_portal_user(
+    db: Session,
+    student: Student,
+    *,
+    unique_code: str | None = None,
+    student_email: str | None = None,
+) -> User:
+    """Asegura que el alumno tenga un User de portal STUDENT vinculado.
+
+    Si `student.user_id` ya existe, devuelve ese User (incluso si está
+    inactivo: el caller lo activa si corresponde).
+    Si no existe, crea un User placeholder bloqueado (igual que el flujo
+    create_student) y vincula `student.user_id`. Usa el `unique_code`
+    provisto o vuelve a leer `student.unique_code` para armar el email
+    placeholder `{code}@pendiente.eldojo.tech`.
+    """
+
+    if student.user_id is not None:
+        existing = db.get(User, student.user_id)
+        if existing is not None:
+            return existing
+
+    code = (unique_code or student.unique_code or "").strip() or f"s{student.id}"
+    placeholder_email = f"{code.lower()}@pendiente.eldojo.tech"
+    temp_password = secrets.token_urlsafe(16)
+    portal_user = User(
+        first_name=student.first_name,
+        last_name=student.last_name,
+        email=placeholder_email,
+        password_hash=hash_password(temp_password),
+        role=UserRole.STUDENT,
+        is_active=True,
+        email_verified_at=None,
+        first_time=True,
+        last_login_at=None,
+    )
+    db.add(portal_user)
+    db.flush()
+    student.user_id = portal_user.id
+    if student_email:
+        object.__setattr__(portal_user, "_pending_invitation_email", student_email)
+    return portal_user
+
+
 def get_student_or_404(db: Session, student_id: int, *, include_details: bool = False) -> Student:
     """Obtiene un alumno existente o corta con 404."""
 
@@ -327,23 +371,12 @@ def create_student(
         db.flush()
 
         if should_enable_portal:
-            temp_password = secrets.token_urlsafe(16)
-            placeholder_email = f"{unique_code.lower()}@pendiente.eldojo.tech"
-            portal_user = User(
-                first_name=student.first_name,
-                last_name=student.last_name,
-                email=placeholder_email,
-                password_hash=hash_password(temp_password),
-                role=UserRole.STUDENT,
-                is_active=True,
-                email_verified_at=None,
-                first_time=True,
-                last_login_at=None,
+            portal_user = _ensure_student_has_portal_user(
+                db,
+                student,
+                unique_code=unique_code,
+                student_email=payload.student_email,
             )
-            db.add(portal_user)
-            db.flush()
-            student.user_id = portal_user.id
-
             raw_token, token_hash, token_tail = generate_student_invitation_token()
             db.add(
                 StudentInvitationToken(
@@ -614,6 +647,9 @@ def resend_student_invitation(
 ) -> Student:
     """Regenera la invitación del portal, invalida la anterior y devuelve un link nuevo.
 
+    Si el alumno aún no tiene un usuario de portal (user_id is None) o el
+    usuario existente estaba desactivado, se crea/reactiva automáticamente
+    (acceso habilitado por defecto para todos los alumnos, sin pasos extra).
     Incrementa `sent_count` para auditoría y devuelve `portal_access.invitation_link`
     con el nuevo enlace (solo visible en esta respuesta).
     """
@@ -624,12 +660,6 @@ def resend_student_invitation(
         organization_id=student.organization_id,
         branch_id=student.branch_id,
     )
-    if student.user_id is None:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="Este alumno aún no tiene un usuario de portal vinculado. "
-            "Edita el alumno y habilita el acceso primero.",
-        )
 
     last_token = db.scalar(
         select(StudentInvitationToken)
@@ -639,13 +669,21 @@ def resend_student_invitation(
     new_sent_count = int(getattr(last_token, "sent_count", 0) or 0) + 1
     last_email_sent_to = getattr(last_token, "email_sent_to", None) if last_token else None
 
+    portal_user = _ensure_student_has_portal_user(
+        db,
+        student,
+        student_email=last_email_sent_to,
+    )
+    if not portal_user.is_active:
+        portal_user.is_active = True
+
     invalidate_student_invitations(db, student_id=student.id, used_at=_utc_now())
 
     raw_token, token_hash, token_tail = generate_student_invitation_token()
     db.add(
         StudentInvitationToken(
             student_id=student.id,
-            user_id=student.user_id,
+            user_id=portal_user.id,
             token_hash=token_hash,
             token_plain_tail=token_tail,
             expires_at=student_invitation_expires_at(),

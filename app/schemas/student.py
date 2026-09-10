@@ -85,11 +85,13 @@ class StudentBase(BaseModel):
 class StudentCreate(StudentBase):
     """Payload para crear un alumno.
 
-    Incluye flags optativos para habilitar el portal del alumno
-    y precargar el email de acceso que se usará en la invitación.
+    Por defecto habilita automáticamente el acceso al portal del alumno
+    (crea un usuario placeholder y genera un link de invitación).
+    El email de acceso `student_email` es optativo y se usa solo para
+    auditoría / envío manual del link.
     """
 
-    enable_portal_access: bool = False
+    enable_portal_access: bool = True
     student_email: str | None = Field(default=None, max_length=255)
 
     @field_validator("student_email")
