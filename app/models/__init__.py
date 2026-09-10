@@ -6,6 +6,7 @@ from app.models.belts import BeltLevel, BeltStripe, StudentBeltHistory
 from app.models.curriculum import Discipline
 from app.models.email_verification import EmailVerificationToken
 from app.models.emergency_contact import EmergencyContact
+from app.models.student_invitation import StudentInvitationToken
 from app.models.fight_record import FightRecordType, StudentFightRecord
 from app.models.finance import Payment
 from app.models.medical_record import MedicalRecord
@@ -40,6 +41,7 @@ __all__ = [
     "StudentBeltHistory",
     "StudentDocument",
     "StudentFightRecord",
+    "StudentInvitationToken",
     "TrajectoryEvent",
     "User",
 ]

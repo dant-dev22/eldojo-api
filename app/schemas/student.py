@@ -15,6 +15,19 @@ from app.schemas.medical_record import MedicalRecordRead
 from app.schemas.student_document import StudentDocumentRead
 
 
+class StudentPortalAccessStatus(BaseModel):
+    """Estado del acceso al portal del alumno (pantalla admin + ficha)."""
+
+    has_linked_user: bool = False
+    user_is_active: bool | None = None
+    user_email_verified: bool | None = None
+    pending_invitation_exists: bool = False
+    invitation_expires_at: datetime | None = None
+    invitation_sent_count: int = 0
+    invitation_link: str | None = None
+    invitation_email_sent_to: str | None = None
+
+
 class StudentBase(BaseModel):
     """Campos compartidos de alumno."""
 
@@ -70,7 +83,21 @@ class StudentBase(BaseModel):
 
 
 class StudentCreate(StudentBase):
-    """Payload para crear un alumno."""
+    """Payload para crear un alumno.
+
+    Incluye flags optativos para habilitar el portal del alumno
+    y precargar el email de acceso que se usará en la invitación.
+    """
+
+    enable_portal_access: bool = False
+    student_email: str | None = Field(default=None, max_length=255)
+
+    @field_validator("student_email")
+    @classmethod
+    def normalize_student_email(cls, value: str | None) -> str | None:
+        if value is None or not value.strip():
+            return None
+        return value.strip().lower()
 
 
 class StudentUpdate(BaseModel):
@@ -164,6 +191,7 @@ class StudentRead(BaseModel):
     medical_record: MedicalRecordRead | None = None
     documents: list[StudentDocumentRead] | None = None
     authorized_persons: list[AuthorizedPersonRead] | None = None
+    portal_access: StudentPortalAccessStatus | None = None
     profile_completeness: "StudentProfileCompleteness | None" = None
 
 

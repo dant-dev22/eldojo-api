@@ -60,6 +60,13 @@ class Settings:
         "ACADEMY_VERIFICATION_URL_BASE",
         "http://localhost:8081/confirmar-cuenta",
     )
+    student_invitation_token_expire_days: int = int(
+        os.getenv("STUDENT_INVITATION_TOKEN_EXPIRE_DAYS", "7")
+    )
+    student_invitation_url_base: str = os.getenv(
+        "STUDENT_INVITATION_URL_BASE",
+        "http://localhost:8081/activar",
+    )
     smtp_host: str | None = os.getenv("SMTP_HOST")
     smtp_port: int = int(os.getenv("SMTP_PORT", "465"))
     smtp_username: str | None = os.getenv("SMTP_USERNAME")

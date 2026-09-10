@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 import re
 import unicodedata
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
@@ -28,6 +28,10 @@ from app.core.security import (
     hash_password,
     verify_password,
 )
+from app.core.student_invitation import (
+    find_pending_student_invitation_by_raw,
+    invalidate_student_invitations,
+)
 from app.db.session import get_db
 from app.models.academy_pending_session import AcademyPendingSession
 from app.models.email_verification import EmailVerificationToken
@@ -35,6 +39,7 @@ from app.models.organization import Organization
 from app.models.enums import UserRole
 from app.models.session_sync_ticket import SessionSyncTicket
 from app.models.student import Student
+from app.models.student_invitation import StudentInvitationToken
 from app.models.user import AdminAssignment, User
 from app.schemas.auth import (
     AcademyConfirmRequest,
@@ -47,6 +52,8 @@ from app.schemas.auth import (
     RefreshRequest,
     SessionTicketCreateResponse,
     SessionTicketRedeemRequest,
+    StudentInvitationPreviewResponse,
+    StudentInvitationRedeemRequest,
     StudentRegisterRequest,
     TokenResponse,
     TutorialStateUpdateRequest,
@@ -351,6 +358,13 @@ def login(payload: LoginRequest, db: Session = Depends(get_db)) -> TokenResponse
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="El usuario está inactivo",
+        )
+
+    if user.role == UserRole.STUDENT and user.email_verified_at is None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Tu dojo te compartió un enlace de activación personalizado. "
+            "Abre ese enlace para establecer tu contraseña y confirmar tu correo antes de iniciar sesión.",
         )
 
     user.last_login_at = utc_now()
@@ -768,5 +782,186 @@ def redeem_session_sync_ticket(
     db.commit()
     db.refresh(user)
 
+    return build_token_response(user)
+
+
+# ======================== Student Invitation (público) ========================
+
+
+def _is_placeholder_email(email: str) -> bool:
+    """Detecta si el email es el placeholder temporal generado en el alta."""
+
+    if not email:
+        return True
+    return email.lower().endswith("@pendiente.eldojo.tech")
+
+
+def _find_invitation_by_raw(
+    db: Session, raw_token: str
+) -> StudentInvitationToken | None:
+    """Busca la invitación por hash sin validar vigencia (para distinguir estados)."""
+
+    from app.core.security import hash_email_verification_token
+
+    if not raw_token:
+        return None
+    token_hash = hash_email_verification_token(raw_token)
+    return db.scalar(
+        select(StudentInvitationToken).where(StudentInvitationToken.token_hash == token_hash)
+    )
+
+
+@router.get("/student-invitation", response_model=StudentInvitationPreviewResponse)
+def preview_student_invitation(
+    token: str = Query(..., min_length=16, max_length=512),
+    db: Session = Depends(get_db),
+) -> StudentInvitationPreviewResponse:
+    """Vista pública del estado de una invitación de alumno.
+
+    Devuelve `status` ∈ {valid, invalid, used, expired} junto con datos
+    amigables para renderizar la pantalla de activación.
+    """
+
+    invitation = _find_invitation_by_raw(db, token)
+    now = utc_now()
+
+    if invitation is None:
+        return StudentInvitationPreviewResponse(
+            status="invalid",
+            message="El enlace de activación no es válido.",
+        )
+
+    if invitation.used_at is not None:
+        return StudentInvitationPreviewResponse(
+            status="used",
+            message="Este enlace de activación ya fue utilizado.",
+        )
+
+    if invitation.expires_at <= now:
+        return StudentInvitationPreviewResponse(
+            status="expired",
+            message="Este enlace de activación ha expirado. Pide a tu dojo que te reenvíe uno nuevo.",
+        )
+
+    student = db.get(Student, invitation.student_id)
+    organization = db.get(Organization, student.organization_id) if student else None
+    dojo_name = getattr(organization, "name", None) if organization else None
+
+    suggested_email: str | None = None
+    if getattr(invitation, "email_sent_to", None):
+        suggested_email = invitation.email_sent_to
+    elif student and getattr(student, "email", None):
+        suggested_email = student.email
+    elif invitation.user_id:
+        user = db.get(User, invitation.user_id)
+        if user and not _is_placeholder_email(user.email):
+            suggested_email = user.email
+
+    return StudentInvitationPreviewResponse(
+        status="valid",
+        message="Activa tu cuenta y personaliza tu acceso al portal del alumno.",
+        first_name=getattr(student, "first_name", None),
+        last_name=getattr(student, "last_name", None),
+        unique_code=getattr(student, "unique_code", None),
+        suggested_email=suggested_email,
+        dojo_name=dojo_name,
+        expires_at=invitation.expires_at,
+    )
+
+
+@router.post("/student-invitation/redeem", response_model=TokenResponse)
+def redeem_student_invitation(
+    payload: StudentInvitationRedeemRequest,
+    db: Session = Depends(get_db),
+) -> TokenResponse:
+    """Activa el portal del alumno y devuelve tokens (auto-login).
+
+    Endpoint público. Valida contraseñas/terminos via schema, resuelve
+    el email final, actualiza el usuario placeholder, marca el token
+    usado e invalida invitaciones hermanas.
+    """
+
+    invitation = _find_invitation_by_raw(db, payload.token)
+    now = utc_now()
+
+    if invitation is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="El enlace de activación no es válido.",
+        )
+    if invitation.used_at is not None:
+        raise HTTPException(
+            status_code=status.HTTP_410_GONE,
+            detail="Este enlace de activación ya fue utilizado.",
+        )
+    if invitation.expires_at <= now:
+        raise HTTPException(
+            status_code=status.HTTP_410_GONE,
+            detail="Este enlace de activación ha expirado. Pide a tu dojo que te reenvíe uno nuevo.",
+        )
+
+    if invitation.user_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Esta invitación no tiene un usuario asociado.",
+        )
+
+    user = db.get(User, invitation.user_id)
+    student = db.get(Student, invitation.student_id)
+    if user is None or student is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="La cuenta asociada a esta invitación ya no existe.",
+        )
+    if not user.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="El acceso al portal fue revocado por tu dojo.",
+        )
+
+    final_email: str | None = None
+    if payload.email:
+        final_email = payload.email
+    elif invitation.email_sent_to:
+        final_email = invitation.email_sent_to
+    elif student.email:
+        final_email = student.email
+    elif not _is_placeholder_email(user.email):
+        final_email = user.email
+
+    if final_email is None:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Debes proporcionar un correo electrónico para tu cuenta.",
+        )
+
+    duplicate = db.scalar(
+        select(User).where(User.email == final_email, User.id != user.id)
+    )
+    if duplicate is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Ese correo ya está registrado en otra cuenta.",
+        )
+
+    user.email = final_email
+    user.password_hash = hash_password(payload.password)
+    user.email_verified_at = now
+    user.last_login_at = now
+    if user.first_name is None:
+        user.first_name = student.first_name
+    if user.last_name is None:
+        user.last_name = student.last_name
+
+    invitation.used_at = now
+    invalidate_student_invitations(db, student_id=student.id, user_id=user.id, used_at=now)
+
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise build_duplicate_error(exc, "No fue posible activar tu cuenta") from exc
+
+    db.refresh(user)
     return build_token_response(user)
 

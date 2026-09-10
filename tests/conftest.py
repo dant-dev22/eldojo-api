@@ -19,6 +19,7 @@ from app.models.belts import BeltLevel, BeltStripe, StudentBeltHistory  # noqa: 
 from app.models.curriculum import Discipline
 from app.models.email_verification import EmailVerificationToken  # noqa: F401
 from app.models.emergency_contact import EmergencyContact  # noqa: F401
+from app.models.student_invitation import StudentInvitationToken  # noqa: F401
 from app.models.enums import (
     AttendanceMethod,
     PaymentStatus,

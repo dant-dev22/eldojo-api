@@ -92,6 +92,7 @@ class UserRead(BaseModel):
     role: UserRole
     is_active: bool
     first_time: bool
+    email_verified_at: datetime | None
     last_login_at: datetime | None
     created_at: datetime
     updated_at: datetime

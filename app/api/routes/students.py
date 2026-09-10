@@ -2,32 +2,48 @@
 
 from __future__ import annotations
 
+import secrets
 from datetime import date, datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import or_, select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
 from app.api.dependencies import require_active_user
 from app.core.authorization import ensure_can_access_operational_scope, scope_branch_filter
+from app.core.security import hash_password
 from app.core.student_codes import build_student_unique_code
+from app.core.student_invitation import (
+    build_student_invitation_link,
+    generate_student_invitation_token,
+    invalidate_student_invitations,
+    student_invitation_expires_at,
+)
 from app.db.session import get_db
 from app.models.belts import BeltLevel, BeltStripe
 from app.models.enums import StudentStatus, UserRole
 from app.models.organization import Branch, Organization
 from app.models.student import Student
+from app.models.student_invitation import StudentInvitationToken
 from app.models.teaching import MartialClass
 from app.models.user import User
 from app.schemas.attendance import StudentAttendanceSummary
 from app.schemas.common import MessageResponse
 from app.schemas.student import (
     StudentCreate,
+    StudentPortalAccessStatus,
     StudentProfileCompleteness,
     StudentRead,
     StudentUpdate,
 )
 from app.services.attendance_summary_service import build_student_attendance_summary
+
+
+def _utc_now() -> datetime:
+    """Helper para UTC naive coherente con la base actual."""
+
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
 router = APIRouter(prefix="/students", tags=["students"])
@@ -98,6 +114,58 @@ def compute_profile_completeness(student: Student) -> StudentProfileCompleteness
 def attach_completeness(student: Student) -> Student:
     """Adjunta el atributo dinámico profile_completeness al modelo ORM."""
     object.__setattr__(student, "profile_completeness", compute_profile_completeness(student))
+    return student
+
+
+def _populate_portal_access_status(
+    db: Session,
+    student: Student,
+    *,
+    latest_raw_token: str | None = None,
+) -> StudentPortalAccessStatus:
+    """Construye el estado de acceso al portal para un alumno.
+
+    Si `latest_raw_token` se provee (solo se dispone de él inmediatamente
+    después de generar una invitación nueva), se incluye `invitation_link`
+    con la URL pública. En cualquier otro caso, el valor raw no está
+    accesible desde la BD (solo se guarda el hash) y el link se omite.
+    """
+
+    status_obj = StudentPortalAccessStatus()
+
+    if student.user_id is not None:
+        user = db.get(User, student.user_id)
+        if user is not None:
+            status_obj.has_linked_user = True
+            status_obj.user_is_active = bool(user.is_active)
+            status_obj.user_email_verified = user.email_verified_at is not None
+
+    latest_invitation = db.scalar(
+        select(StudentInvitationToken)
+        .where(StudentInvitationToken.student_id == student.id)
+        .order_by(StudentInvitationToken.created_at.desc(), StudentInvitationToken.id.desc())
+    )
+    if latest_invitation is not None:
+        is_pending = latest_invitation.used_at is None and latest_invitation.expires_at > _utc_now()
+        status_obj.pending_invitation_exists = is_pending
+        if is_pending:
+            status_obj.invitation_expires_at = latest_invitation.expires_at
+        status_obj.invitation_sent_count = int(latest_invitation.sent_count or 0)
+        status_obj.invitation_email_sent_to = latest_invitation.email_sent_to
+
+    if latest_raw_token:
+        status_obj.invitation_link = build_student_invitation_link(latest_raw_token)
+
+    return status_obj
+
+
+def attach_portal_access(db: Session, student: Student, *, latest_raw_token: str | None = None) -> Student:
+    """Adjunta el estado portal_access al ORM Student como atributo dinámico."""
+    object.__setattr__(
+        student,
+        "portal_access",
+        _populate_portal_access_status(db, student, latest_raw_token=latest_raw_token),
+    )
     return student
 
 
@@ -221,7 +289,15 @@ def create_student(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_active_user),
 ) -> Student:
-    """Crea un alumno y genera su `unique_code` automáticamente."""
+    """Crea un alumno y genera su `unique_code` automáticamente.
+
+    Si `enable_portal_access=True` y no se proporcionó `user_id`:
+      - Crea un User STUDENT placeholder con credenciales temporales bloqueadas
+        para login normal (email_verified_at=None).
+      - Genera y persiste un token de invitación.
+      - Devuelve `portal_access.invitation_link` con el enlace público que
+        el admin debe compartir con el alumno.
+    """
 
     ensure_can_access_operational_scope(
         current_user,
@@ -238,13 +314,52 @@ def create_student(
         current_stripe_id=payload.current_stripe_id,
     )
 
-    student = Student(
-        **payload.model_dump(),
-        unique_code=build_student_unique_code(db, organization),
-    )
+    unique_code = build_student_unique_code(db, organization)
+    should_enable_portal = bool(payload.enable_portal_access) and payload.user_id is None
+
+    student_data = payload.model_dump(exclude={"enable_portal_access", "student_email"})
+    student = Student(**student_data, unique_code=unique_code)
     db.add(student)
 
+    generated_raw_token: str | None = None
+
     try:
+        db.flush()
+
+        if should_enable_portal:
+            temp_password = secrets.token_urlsafe(16)
+            placeholder_email = f"{unique_code.lower()}@pendiente.eldojo.tech"
+            portal_user = User(
+                first_name=student.first_name,
+                last_name=student.last_name,
+                email=placeholder_email,
+                password_hash=hash_password(temp_password),
+                role=UserRole.STUDENT,
+                is_active=True,
+                email_verified_at=None,
+                first_time=True,
+                last_login_at=None,
+            )
+            db.add(portal_user)
+            db.flush()
+            student.user_id = portal_user.id
+
+            raw_token, token_hash, token_tail = generate_student_invitation_token()
+            db.add(
+                StudentInvitationToken(
+                    student_id=student.id,
+                    user_id=portal_user.id,
+                    token_hash=token_hash,
+                    token_plain_tail=token_tail,
+                    expires_at=student_invitation_expires_at(),
+                    used_at=None,
+                    sent_count=1,
+                    created_by_admin_id=current_user.id,
+                    email_sent_to=payload.student_email,
+                )
+            )
+            generated_raw_token = raw_token
+
         db.commit()
     except IntegrityError as exc:
         db.rollback()
@@ -259,7 +374,9 @@ def create_student(
         .options(*_student_load_options(include_details=True))
     )
     result = refreshed or student
-    return attach_completeness(result)
+    attach_completeness(result)
+    attach_portal_access(db, result, latest_raw_token=generated_raw_token)
+    return result
 
 
 @router.get("", response_model=list[StudentRead])
@@ -271,10 +388,15 @@ def list_students(
     search: str | None = Query(default=None, min_length=1, max_length=100),
     include_deleted: bool = False,
     include_completeness: bool = Query(default=True),
+    include_portal_access: bool = Query(default=False),
     db: Session = Depends(get_db),
     current_user: User = Depends(require_active_user),
 ) -> list[Student]:
-    """Lista alumnos con filtros por organización, sucursal, estado y nombre."""
+    """Lista alumnos con filtros por organización, sucursal, estado y nombre.
+
+    `include_portal_access` es opt-in (default=False) por performance:
+    requiere hasta 2 queries adicionales por alumno (User + último token).
+    """
 
     organization_id, branch_id = scope_branch_filter(
         current_user,
@@ -307,15 +429,18 @@ def list_students(
         query = query.where(Student.deleted_at.is_(None))
 
     students = list(db.scalars(query).unique().all())
-    if include_completeness or incomplete_only:
-        processed: list[Student] = []
-        for s in students:
+    processed: list[Student] = []
+    for s in students:
+        skip = False
+        if include_completeness or incomplete_only:
             attach_completeness(s)
             if incomplete_only and s.profile_completeness and s.profile_completeness.is_complete:
-                continue
+                skip = True
+        if not skip and include_portal_access:
+            attach_portal_access(db, s)
+        if not skip:
             processed.append(s)
-        return processed
-    return students
+    return processed
 
 
 @router.get("/{student_id}", response_model=StudentRead)
@@ -338,6 +463,7 @@ def get_student(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Alumno no encontrado")
     if include_details:
         attach_completeness(student)
+    attach_portal_access(db, student)
     return student
 
 
@@ -458,6 +584,125 @@ def delete_student(
     student.status = StudentStatus.INACTIVE
     db.commit()
     return MessageResponse(message="Alumno eliminado lógicamente")
+
+
+# ======================== Portal Access (admin) ========================
+
+
+@router.get("/{student_id}/portal-access", response_model=StudentPortalAccessStatus)
+def get_student_portal_access_status(
+    student_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_active_user),
+) -> StudentPortalAccessStatus:
+    """Devuelve el estado del portal del alumno (sin exponer links)."""
+
+    student = get_student_or_404(db, student_id)
+    ensure_can_access_operational_scope(
+        current_user,
+        organization_id=student.organization_id,
+        branch_id=student.branch_id,
+    )
+    return _populate_portal_access_status(db, student)
+
+
+@router.post("/{student_id}/resend-invitation", response_model=StudentRead)
+def resend_student_invitation(
+    student_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_active_user),
+) -> Student:
+    """Regenera la invitación del portal, invalida la anterior y devuelve un link nuevo.
+
+    Incrementa `sent_count` para auditoría y devuelve `portal_access.invitation_link`
+    con el nuevo enlace (solo visible en esta respuesta).
+    """
+
+    student = get_student_or_404(db, student_id)
+    ensure_can_access_operational_scope(
+        current_user,
+        organization_id=student.organization_id,
+        branch_id=student.branch_id,
+    )
+    if student.user_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Este alumno aún no tiene un usuario de portal vinculado. "
+            "Edita el alumno y habilita el acceso primero.",
+        )
+
+    last_token = db.scalar(
+        select(StudentInvitationToken)
+        .where(StudentInvitationToken.student_id == student.id)
+        .order_by(StudentInvitationToken.created_at.desc(), StudentInvitationToken.id.desc())
+    )
+    new_sent_count = int(getattr(last_token, "sent_count", 0) or 0) + 1
+    last_email_sent_to = getattr(last_token, "email_sent_to", None) if last_token else None
+
+    invalidate_student_invitations(db, student_id=student.id, used_at=_utc_now())
+
+    raw_token, token_hash, token_tail = generate_student_invitation_token()
+    db.add(
+        StudentInvitationToken(
+            student_id=student.id,
+            user_id=student.user_id,
+            token_hash=token_hash,
+            token_plain_tail=token_tail,
+            expires_at=student_invitation_expires_at(),
+            used_at=None,
+            sent_count=new_sent_count,
+            created_by_admin_id=current_user.id,
+            email_sent_to=last_email_sent_to,
+        )
+    )
+    db.commit()
+
+    refreshed = db.scalar(
+        select(Student)
+        .where(Student.id == student.id)
+        .options(*_student_load_options(include_details=True))
+    )
+    result = refreshed or student
+    attach_completeness(result)
+    attach_portal_access(db, result, latest_raw_token=raw_token)
+    return result
+
+
+@router.post("/{student_id}/revoke-portal-access", response_model=StudentRead)
+def revoke_student_portal_access(
+    student_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_active_user),
+) -> Student:
+    """Desactiva el usuario vinculado al alumno e invalida todas sus invitaciones.
+
+    El alumno no podrá iniciar sesión ni canjear tokens después de esta acción.
+    """
+
+    student = get_student_or_404(db, student_id)
+    ensure_can_access_operational_scope(
+        current_user,
+        organization_id=student.organization_id,
+        branch_id=student.branch_id,
+    )
+
+    if student.user_id is not None:
+        user = db.get(User, student.user_id)
+        if user is not None:
+            user.is_active = False
+
+    invalidate_student_invitations(db, student_id=student.id, used_at=_utc_now())
+    db.commit()
+
+    refreshed = db.scalar(
+        select(Student)
+        .where(Student.id == student.id)
+        .options(*_student_load_options(include_details=True))
+    )
+    result = refreshed or student
+    attach_completeness(result)
+    attach_portal_access(db, result)
+    return result
 
 
 # ======================== Sub-recursos ========================

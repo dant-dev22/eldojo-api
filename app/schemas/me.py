@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import date
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.models.enums import PaymentStatus, StudentStatus, UserRole
 
@@ -37,3 +37,30 @@ class MyProfileRead(BaseModel):
     next_payment_date: date | None
     status: StudentStatus
     available_classes: list[AvailableClassRead]
+
+
+class MyPasswordChangeRequest(BaseModel):
+    """Payload para que el alumno cambie su propia contraseña."""
+
+    current_password: str = Field(min_length=8, max_length=128)
+    new_password: str = Field(min_length=8, max_length=128)
+    confirm_password: str = Field(min_length=8, max_length=128)
+
+    @model_validator(mode="after")
+    def validate_passwords_match(self) -> "MyPasswordChangeRequest":
+        if self.new_password != self.confirm_password:
+            raise ValueError("La contraseña nueva y su confirmación no coinciden")
+        if self.current_password == self.new_password:
+            raise ValueError("La contraseña nueva debe ser distinta a la actual")
+        return self
+
+
+class MyEmailChangeRequest(BaseModel):
+    """Payload para que el alumno cambie su propio correo."""
+
+    new_email: str = Field(min_length=5, max_length=255)
+
+    @field_validator("new_email")
+    @classmethod
+    def normalize_new_email(cls, value: str) -> str:
+        return value.strip().lower()

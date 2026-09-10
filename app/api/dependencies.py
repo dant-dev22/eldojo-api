@@ -56,3 +56,20 @@ def require_active_user(current_user: User = Depends(get_current_user)) -> User:
             detail="El usuario autenticado está inactivo",
         )
     return current_user
+
+
+def require_student_user(current_user: User = Depends(require_active_user)) -> User:
+    """Asegura que el usuario autenticado tenga rol STUDENT.
+
+    Compone require_active_user: primero valida token y que el usuario
+    siga activo, luego rechaza roles no-alumno con 403.
+    """
+
+    from app.models.enums import UserRole
+
+    if current_user.role != UserRole.STUDENT:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Este endpoint solo está disponible para alumnos",
+        )
+    return current_user

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel, Field, field_validator
+from datetime import datetime
+
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.schemas.user import UserRead
 
@@ -146,3 +148,41 @@ class SessionTicketRedeemRequest(BaseModel):
     """Payload para canjear un ticket de sincronización y obtener tokens."""
 
     ticket: str = Field(min_length=16, max_length=512)
+
+
+class StudentInvitationPreviewResponse(BaseModel):
+    """Estado público de una invitación de alumno (antes de canjear)."""
+
+    status: str = "valid"
+    message: str
+    first_name: str | None = None
+    last_name: str | None = None
+    unique_code: str | None = None
+    suggested_email: str | None = None
+    dojo_name: str | None = None
+    expires_at: datetime | None = None
+
+
+class StudentInvitationRedeemRequest(BaseModel):
+    """Payload público para activar el portal del alumno con su invitación."""
+
+    token: str = Field(min_length=16, max_length=512)
+    email: str | None = Field(default=None, max_length=255)
+    password: str = Field(min_length=8, max_length=128)
+    confirm_password: str = Field(min_length=8, max_length=128)
+    accept_terms: bool = Field(..., description="Aceptar términos de uso y privacidad")
+
+    @field_validator("email")
+    @classmethod
+    def normalize_email_optional(cls, value: str | None) -> str | None:
+        if value is None or not value.strip():
+            return None
+        return value.strip().lower()
+
+    @model_validator(mode="after")
+    def validate_password_match_and_terms(self) -> "StudentInvitationRedeemRequest":
+        if self.password != self.confirm_password:
+            raise ValueError("Las contraseñas no coinciden")
+        if not self.accept_terms:
+            raise ValueError("Debes aceptar los términos para activar tu cuenta")
+        return self
