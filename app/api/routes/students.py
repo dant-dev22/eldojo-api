@@ -113,7 +113,13 @@ def compute_profile_completeness(student: Student) -> StudentProfileCompleteness
 
 def attach_completeness(student: Student) -> Student:
     """Adjunta el atributo dinámico profile_completeness al modelo ORM."""
-    object.__setattr__(student, "profile_completeness", compute_profile_completeness(student))
+
+    value = compute_profile_completeness(student)
+    object.__setattr__(student, "profile_completeness", value)
+    try:
+        student.__dict__["profile_completeness"] = value
+    except Exception:
+        pass
     return student
 
 
@@ -165,11 +171,13 @@ def _populate_portal_access_status(
 
 def attach_portal_access(db: Session, student: Student, *, latest_raw_token: str | None = None) -> Student:
     """Adjunta el estado portal_access al ORM Student como atributo dinámico."""
-    object.__setattr__(
-        student,
-        "portal_access",
-        _populate_portal_access_status(db, student, latest_raw_token=latest_raw_token),
-    )
+
+    value = _populate_portal_access_status(db, student, latest_raw_token=latest_raw_token)
+    object.__setattr__(student, "portal_access", value)
+    try:
+        student.__dict__["portal_access"] = value
+    except Exception:
+        pass
     return student
 
 
@@ -419,22 +427,29 @@ def create_student(
 def build_student_read(student: Student) -> StudentRead:
     """Construye un StudentRead incluyendo atributos dinámicos.
 
-    Pydantic v2 con from_attributes=True en el schema no siempre captura
-    atributos arbitrarios inyectados con setattr (ej: portal_access,
-    profile_completeness). Este helper construye el modelo explícitamente
-    para garantizar que esos campos aparezcan en la respuesta JSON.
+    Pydantic v2 con from_attributes=True no siempre captura attrs dinámicos
+    agregados por setattr (ej: portal_access, profile_completeness). Para
+    garantizar la serialización, armamos un dict fuente combinando el
+    __dict__ del ORM (con Columns) más los atributos dinámicos explícitos,
+    y construimos el modelo Pydantic desde ese dict (no from_attributes).
     """
 
-    extra: dict[str, object] = {}
+    base: dict[str, object] = {}
+    try:
+        # Claves de Column y relationships cargadas por SQLAlchemy.
+        base.update({k: v for k, v in student.__dict__.items() if not k.startswith("_sa_")})
+    except Exception:
+        pass
+
+    # Sobreescribir/agregar attrs dinámicos si existen.
     portal_access = getattr(student, "portal_access", None)
     profile_completeness = getattr(student, "profile_completeness", None)
     if portal_access is not None:
-        extra["portal_access"] = portal_access
+        base["portal_access"] = portal_access
     if profile_completeness is not None:
-        extra["profile_completeness"] = profile_completeness
-    return StudentRead.model_validate(student, from_attributes=True).model_copy(
-        update=extra,
-    )
+        base["profile_completeness"] = profile_completeness
+
+    return StudentRead.model_validate(base)
 
 
 @router.get("", response_model=list[StudentRead])
@@ -670,13 +685,16 @@ def resend_student_invitation(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_active_user),
 ) -> Student:
-    """Regenera la invitación del portal, invalida la anterior y devuelve un link nuevo.
+    """Genera o regenera la invitación del portal manteniendo máximo 1 pendiente.
 
-    Si el alumno aún no tiene un usuario de portal (user_id is None) o el
-    usuario existente estaba desactivado, se crea/reactiva automáticamente
-    (acceso habilitado por defecto para todos los alumnos, sin pasos extra).
-    Incrementa `sent_count` para auditoría y devuelve `portal_access.invitation_link`
-    con el nuevo enlace (solo visible en esta respuesta).
+    - Si existe un token PENDIENTE (no usado y no vencido) para el alumno,
+      se REUTILIZA ese mismo row actualizando hash/fecha/sent_count (no se
+      insertan filas nuevas, no hay filas en la tabla por reenvío).
+    - Si no hay token pendiente, se crea uno nuevo.
+    - Si el alumno aún no tiene usuario portal o estaba inactivo, se crea o
+      re-activa automáticamente.
+    - El link generado (raw token) solo se devuelve en esta respuesta via
+      `portal_access.invitation_link`.
     """
 
     student = get_student_or_404(db, student_id)
@@ -686,13 +704,26 @@ def resend_student_invitation(
         branch_id=student.branch_id,
     )
 
-    last_token = db.scalar(
+    now = _utc_now()
+    existing_pending = db.scalar(
         select(StudentInvitationToken)
         .where(StudentInvitationToken.student_id == student.id)
         .order_by(StudentInvitationToken.created_at.desc(), StudentInvitationToken.id.desc())
+        .limit(1)
     )
-    new_sent_count = int(getattr(last_token, "sent_count", 0) or 0) + 1
-    last_email_sent_to = getattr(last_token, "email_sent_to", None) if last_token else None
+    is_pending_existing = False
+    if existing_pending is not None:
+        is_not_expired = (
+            existing_pending.expires_at is None
+            or existing_pending.expires_at > now
+        )
+        is_pending_existing = existing_pending.used_at is None and is_not_expired
+
+    last_email_sent_to = getattr(existing_pending, "email_sent_to", None)
+    if is_pending_existing:
+        new_sent_count = int(getattr(existing_pending, "sent_count", 0) or 0) + 1
+    else:
+        new_sent_count = int(getattr(existing_pending, "sent_count", 0) or 0) + 1
 
     portal_user = _ensure_student_has_portal_user(
         db,
@@ -702,22 +733,33 @@ def resend_student_invitation(
     if not portal_user.is_active:
         portal_user.is_active = True
 
-    invalidate_student_invitations(db, student_id=student.id, used_at=_utc_now())
-
     raw_token, token_hash, token_tail = generate_student_invitation_token()
-    db.add(
-        StudentInvitationToken(
-            student_id=student.id,
-            user_id=portal_user.id,
-            token_hash=token_hash,
-            token_plain_tail=token_tail,
-            expires_at=student_invitation_expires_at(),
-            used_at=None,
-            sent_count=new_sent_count,
-            created_by_admin_id=current_user.id,
-            email_sent_to=last_email_sent_to,
+
+    if is_pending_existing and existing_pending is not None:
+        existing_pending.token_hash = token_hash
+        existing_pending.token_plain_tail = token_tail
+        existing_pending.expires_at = student_invitation_expires_at()
+        existing_pending.sent_count = new_sent_count
+        existing_pending.created_by_admin_id = current_user.id
+        existing_pending.created_at = now
+        existing_pending.user_id = portal_user.id
+    else:
+        if existing_pending is not None:
+            existing_pending.used_at = now
+        db.add(
+            StudentInvitationToken(
+                student_id=student.id,
+                user_id=portal_user.id,
+                token_hash=token_hash,
+                token_plain_tail=token_tail,
+                expires_at=student_invitation_expires_at(),
+                used_at=None,
+                sent_count=new_sent_count,
+                created_by_admin_id=current_user.id,
+                email_sent_to=last_email_sent_to,
+            )
         )
-    )
+
     db.commit()
 
     refreshed = db.scalar(
