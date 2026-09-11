@@ -146,7 +146,11 @@ def _populate_portal_access_status(
         .order_by(StudentInvitationToken.created_at.desc(), StudentInvitationToken.id.desc())
     )
     if latest_invitation is not None:
-        is_pending = latest_invitation.used_at is None and latest_invitation.expires_at > _utc_now()
+        is_not_expired = (
+            latest_invitation.expires_at is None
+            or latest_invitation.expires_at > _utc_now()
+        )
+        is_pending = latest_invitation.used_at is None and is_not_expired
         status_obj.pending_invitation_exists = is_pending
         if is_pending:
             status_obj.invitation_expires_at = latest_invitation.expires_at
@@ -412,6 +416,27 @@ def create_student(
     return result
 
 
+def build_student_read(student: Student) -> StudentRead:
+    """Construye un StudentRead incluyendo atributos dinámicos.
+
+    Pydantic v2 con from_attributes=True en el schema no siempre captura
+    atributos arbitrarios inyectados con setattr (ej: portal_access,
+    profile_completeness). Este helper construye el modelo explícitamente
+    para garantizar que esos campos aparezcan en la respuesta JSON.
+    """
+
+    extra: dict[str, object] = {}
+    portal_access = getattr(student, "portal_access", None)
+    profile_completeness = getattr(student, "profile_completeness", None)
+    if portal_access is not None:
+        extra["portal_access"] = portal_access
+    if profile_completeness is not None:
+        extra["profile_completeness"] = profile_completeness
+    return StudentRead.model_validate(student, from_attributes=True).model_copy(
+        update=extra,
+    )
+
+
 @router.get("", response_model=list[StudentRead])
 def list_students(
     organization_id: int | None = Query(default=None, gt=0),
@@ -473,7 +498,7 @@ def list_students(
             attach_portal_access(db, s)
         if not skip:
             processed.append(s)
-    return processed
+    return [build_student_read(s) for s in processed]
 
 
 @router.get("/{student_id}", response_model=StudentRead)

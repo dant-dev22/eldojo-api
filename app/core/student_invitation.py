@@ -24,12 +24,18 @@ def _utc_now_naive() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
-def student_invitation_expires_at() -> datetime:
-    """Calcula la fecha de expiración de una nueva invitación."""
+def student_invitation_expires_at() -> datetime | None:
+    """Calcula la fecha de expiración de una nueva invitación.
 
-    return _utc_now_naive() + timedelta(
-        days=max(1, int(settings.student_invitation_token_expire_days))
-    )
+    Si `STUDENT_INVITATION_TOKEN_EXPIRE_DAYS` no está definido (None) o
+    es <= 0, devuelve None, lo que significa que la invitación NUNCA
+    expira (hasta que es utilizada o invalidada manualmente).
+    """
+
+    days = settings.student_invitation_token_expire_days
+    if days is None or days <= 0:
+        return None
+    return _utc_now_naive() + timedelta(days=days)
 
 
 def generate_student_invitation_token() -> tuple[str, str, str]:
@@ -108,6 +114,6 @@ def find_pending_student_invitation_by_raw(
         return None
     if invitation.used_at is not None:
         return None
-    if invitation.expires_at <= _utc_now_naive():
+    if invitation.expires_at is not None and invitation.expires_at <= _utc_now_naive():
         return None
     return invitation

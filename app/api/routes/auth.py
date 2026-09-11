@@ -837,7 +837,7 @@ def preview_student_invitation(
             message="Este enlace de activación ya fue utilizado.",
         )
 
-    if invitation.expires_at <= now:
+    if invitation.expires_at is not None and invitation.expires_at <= now:
         return StudentInvitationPreviewResponse(
             status="expired",
             message="Este enlace de activación ha expirado. Pide a tu dojo que te reenvíe uno nuevo.",
@@ -894,7 +894,7 @@ def redeem_student_invitation(
             status_code=status.HTTP_410_GONE,
             detail="Este enlace de activación ya fue utilizado.",
         )
-    if invitation.expires_at <= now:
+    if invitation.expires_at is not None and invitation.expires_at <= now:
         raise HTTPException(
             status_code=status.HTTP_410_GONE,
             detail="Este enlace de activación ha expirado. Pide a tu dojo que te reenvíe uno nuevo.",

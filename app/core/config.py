@@ -50,8 +50,10 @@ class Settings:
     auth_issuer: str = os.getenv("AUTH_ISSUER", "eldojo-backend-api")
     auth_access_token_expire_minutes: int = int(os.getenv("AUTH_ACCESS_TOKEN_EXPIRE_MINUTES", "120"))
     auth_refresh_token_expire_days: int = int(os.getenv("AUTH_REFRESH_TOKEN_EXPIRE_DAYS", "30"))
-    student_invitation_token_expire_days: int = int(
-        os.getenv("STUDENT_INVITATION_TOKEN_EXPIRE_DAYS", "7")
+    student_invitation_token_expire_days: int | None = (
+        int(v)
+        if (v := os.getenv("STUDENT_INVITATION_TOKEN_EXPIRE_DAYS")) is not None and v.strip() != ""
+        else None
     )
     student_invitation_url_base: str = os.getenv(
         "STUDENT_INVITATION_URL_BASE",
