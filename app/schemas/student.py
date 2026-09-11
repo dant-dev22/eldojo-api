@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import date, datetime
 from decimal import Decimal
+from enum import Enum
 
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl, field_validator, model_validator
 
@@ -13,6 +14,25 @@ from app.schemas.belt import BeltLevelSummary, BeltStripeSummary
 from app.schemas.emergency_contact import EmergencyContactRead
 from app.schemas.medical_record import MedicalRecordRead
 from app.schemas.student_document import StudentDocumentRead
+
+
+class StudentPortalInvitationStatus(str, Enum):
+    """Estado semántico de la invitación del portal (admin-facing).
+
+    none     -> Nunca se generó una invitación para este alumno.
+    pending  -> Hay una invitación vigente (no vencida, no usada).
+    expired  -> Última invitación existe pero ya venció (no usada).
+    used     -> Última invitación fue canjeada pero el usuario aún no
+                se vinculó (borde; en general 'linked' cubre este caso).
+    linked   -> El alumno ya tiene un usuario portal activo y verificado;
+                no existe invitación pendiente relevante.
+    """
+
+    NONE = "none"
+    PENDING = "pending"
+    EXPIRED = "expired"
+    USED = "used"
+    LINKED = "linked"
 
 
 class StudentPortalAccessStatus(BaseModel):
@@ -26,6 +46,8 @@ class StudentPortalAccessStatus(BaseModel):
     invitation_sent_count: int = 0
     invitation_link: str | None = None
     invitation_email_sent_to: str | None = None
+    invitation_status: StudentPortalInvitationStatus = StudentPortalInvitationStatus.NONE
+    invitation_can_reconstruct: bool = False
 
 
 class StudentBase(BaseModel):

@@ -15,9 +15,12 @@ from app.core.authorization import ensure_can_access_operational_scope, scope_br
 from app.core.security import hash_password
 from app.core.student_codes import build_student_unique_code
 from app.core.student_invitation import (
+    STUDENT_INVITATION_NONCE_BYTES,
     build_student_invitation_link,
-    generate_student_invitation_token,
+    generate_deterministic_student_invitation_token,
+    generate_student_invitation_nonce,
     invalidate_student_invitations,
+    reconstruct_student_invitation_token,
     student_invitation_expires_at,
 )
 from app.db.session import get_db
@@ -33,6 +36,7 @@ from app.schemas.common import MessageResponse
 from app.schemas.student import (
     StudentCreate,
     StudentPortalAccessStatus,
+    StudentPortalInvitationStatus,
     StudentProfileCompleteness,
     StudentRead,
     StudentUpdate,
@@ -131,40 +135,79 @@ def _populate_portal_access_status(
 ) -> StudentPortalAccessStatus:
     """Construye el estado de acceso al portal para un alumno.
 
-    Si `latest_raw_token` se provee (solo se dispone de él inmediatamente
-    después de generar una invitación nueva), se incluye `invitation_link`
-    con la URL pública. En cualquier otro caso, el valor raw no está
-    accesible desde la BD (solo se guarda el hash) y el link se omite.
+    - Si `latest_raw_token` se provee (inmediatamente después de generar
+      una invitación nueva), se usa para poblar `invitation_link`.
+    - En cualquier otro caso, si la última invitación está PENDIENTE y
+      dispone de `token_nonce`, se RECONSTRUYE el raw_token mediante
+      HMAC determinístico, permitiendo al admin volver a copiar el link
+      sin tener que regenerarlo.
+    - Las filas legacy (nonce=None) no son reconstruibles y requieren
+      regeneración (el frontend detecta invitation_can_reconstruct=False
+      y fuerza regeneración al primer click de copiar).
     """
 
     status_obj = StudentPortalAccessStatus()
 
+    now = _utc_now()
+    has_linked_active_user = False
+    user_email_verified = False
     if student.user_id is not None:
         user = db.get(User, student.user_id)
         if user is not None:
             status_obj.has_linked_user = True
             status_obj.user_is_active = bool(user.is_active)
-            status_obj.user_email_verified = user.email_verified_at is not None
+            user_email_verified = user.email_verified_at is not None
+            status_obj.user_email_verified = user_email_verified
+            has_linked_active_user = bool(user.is_active) and user_email_verified
 
     latest_invitation = db.scalar(
         select(StudentInvitationToken)
         .where(StudentInvitationToken.student_id == student.id)
         .order_by(StudentInvitationToken.created_at.desc(), StudentInvitationToken.id.desc())
     )
+
+    is_not_expired = False
+    is_pending = False
+    is_used = False
+    is_expired_only = False
+    reconstructed_raw: str | None = None
+
     if latest_invitation is not None:
         is_not_expired = (
             latest_invitation.expires_at is None
-            or latest_invitation.expires_at > _utc_now()
+            or latest_invitation.expires_at > now
         )
-        is_pending = latest_invitation.used_at is None and is_not_expired
+        is_used = latest_invitation.used_at is not None
+        is_pending = (not is_used) and is_not_expired
+        is_expired_only = (not is_used) and (not is_not_expired)
+
         status_obj.pending_invitation_exists = is_pending
         if is_pending:
             status_obj.invitation_expires_at = latest_invitation.expires_at
+            reconstructed_raw = reconstruct_student_invitation_token(latest_invitation)
         status_obj.invitation_sent_count = int(latest_invitation.sent_count or 0)
         status_obj.invitation_email_sent_to = latest_invitation.email_sent_to
+        status_obj.invitation_can_reconstruct = bool(reconstructed_raw)
 
+    # === Calcular invitation_status ===
+    if has_linked_active_user:
+        status_obj.invitation_status = StudentPortalInvitationStatus.LINKED
+    elif is_pending:
+        status_obj.invitation_status = StudentPortalInvitationStatus.PENDING
+    elif latest_invitation is None:
+        status_obj.invitation_status = StudentPortalInvitationStatus.NONE
+    elif is_expired_only:
+        status_obj.invitation_status = StudentPortalInvitationStatus.EXPIRED
+    elif is_used:
+        status_obj.invitation_status = StudentPortalInvitationStatus.USED
+    else:
+        status_obj.invitation_status = StudentPortalInvitationStatus.NONE
+
+    # === Poblar invitation_link ===
     if latest_raw_token:
         status_obj.invitation_link = build_student_invitation_link(latest_raw_token)
+    elif reconstructed_raw and is_pending:
+        status_obj.invitation_link = build_student_invitation_link(reconstructed_raw)
 
     return status_obj
 
@@ -389,18 +432,26 @@ def create_student(
                 unique_code=unique_code,
                 student_email=payload.student_email,
             )
-            raw_token, token_hash, token_tail = generate_student_invitation_token()
+            invitation_created_at = _utc_now()
+            invitation_nonce = generate_student_invitation_nonce()
+            raw_token, token_hash, token_tail = generate_deterministic_student_invitation_token(
+                student_id=student.id,
+                nonce=invitation_nonce,
+                created_at=invitation_created_at,
+            )
             db.add(
                 StudentInvitationToken(
                     student_id=student.id,
                     user_id=portal_user.id,
                     token_hash=token_hash,
                     token_plain_tail=token_tail,
+                    token_nonce=invitation_nonce,
                     expires_at=student_invitation_expires_at(),
                     used_at=None,
                     sent_count=1,
                     created_by_admin_id=current_user.id,
                     email_sent_to=payload.student_email,
+                    created_at=invitation_created_at,
                 )
             )
             generated_raw_token = raw_token
@@ -685,16 +736,16 @@ def resend_student_invitation(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_active_user),
 ) -> Student:
-    """Genera o regenera la invitación del portal manteniendo máximo 1 pendiente.
+    """Ensure-and-get de la invitación del portal. GARANTIZA UN SOLO LINK.
 
-    - Si existe un token PENDIENTE (no usado y no vencido) para el alumno,
-      se REUTILIZA ese mismo row actualizando hash/fecha/sent_count (no se
-      insertan filas nuevas, no hay filas en la tabla por reenvío).
-    - Si no hay token pendiente, se crea uno nuevo.
-    - Si el alumno aún no tiene usuario portal o estaba inactivo, se crea o
-      re-activa automáticamente.
-    - El link generado (raw token) solo se devuelve en esta respuesta via
-      `portal_access.invitation_link`.
+    COMPORTAMIENTO NUEVO (2026-09-10):
+      - Si existe una invitación PENDIENTE (no usada y no vencida) Y su
+        `token_nonce` está poblado → NO se regenera nada. Se devuelve
+        la MISMA URL reconstruida vía HMAC y `sent_count` se mantiene.
+      - En cualquier otro caso (no hay invitación, expirada, usada, o
+        legacy sin nonce) → se genera una NUEVA invitación y se marca
+        la anterior como used (si aplica). `sent_count` se incrementa.
+      - El usuario portal se crea/re-activa lazy si corresponde.
     """
 
     student = get_student_or_404(db, student_id)
@@ -712,18 +763,23 @@ def resend_student_invitation(
         .limit(1)
     )
     is_pending_existing = False
+    is_pending_reconstructible = False
     if existing_pending is not None:
         is_not_expired = (
             existing_pending.expires_at is None
             or existing_pending.expires_at > now
         )
         is_pending_existing = existing_pending.used_at is None and is_not_expired
+        if is_pending_existing:
+            nonce = getattr(existing_pending, "token_nonce", None)
+            is_pending_reconstructible = (
+                nonce is not None
+                and isinstance(nonce, (bytes, bytearray))
+                and len(bytes(nonce)) == STUDENT_INVITATION_NONCE_BYTES
+            )
 
     last_email_sent_to = getattr(existing_pending, "email_sent_to", None)
-    if is_pending_existing:
-        new_sent_count = int(getattr(existing_pending, "sent_count", 0) or 0) + 1
-    else:
-        new_sent_count = int(getattr(existing_pending, "sent_count", 0) or 0) + 1
+    prev_sent_count = int(getattr(existing_pending, "sent_count", 0) or 0)
 
     portal_user = _ensure_student_has_portal_user(
         db,
@@ -733,34 +789,52 @@ def resend_student_invitation(
     if not portal_user.is_active:
         portal_user.is_active = True
 
-    raw_token, token_hash, token_tail = generate_student_invitation_token()
+    raw_token: str | None = None
 
-    if is_pending_existing and existing_pending is not None:
-        existing_pending.token_hash = token_hash
-        existing_pending.token_plain_tail = token_tail
-        existing_pending.expires_at = student_invitation_expires_at()
-        existing_pending.sent_count = new_sent_count
+    if is_pending_existing and is_pending_reconstructible and existing_pending is not None:
+        # === Caso idempotente: NO tocar nada, reconstruir y devolver ===
+        raw_token = reconstruct_student_invitation_token(existing_pending)
         existing_pending.created_by_admin_id = current_user.id
-        existing_pending.created_at = now
-        existing_pending.user_id = portal_user.id
+        db.commit()
     else:
-        if existing_pending is not None:
+        # === Caso generación nueva: legacy / expirado / usado / sin invitación ===
+        new_sent_count = prev_sent_count + 1
+        invitation_created_at = now
+        invitation_nonce = generate_student_invitation_nonce()
+        raw_token, token_hash, token_tail = generate_deterministic_student_invitation_token(
+            student_id=student.id,
+            nonce=invitation_nonce,
+            created_at=invitation_created_at,
+        )
+
+        if is_pending_existing and existing_pending is not None:
+            # Pendiente legacy sin nonce → invalidar para mantener "máx 1 pendiente"
             existing_pending.used_at = now
+
+        if (
+            existing_pending is not None
+            and not is_pending_existing
+        ):
+            # Última invitación ya usada o expirada → marcar used_at para trazabilidad
+            if existing_pending.used_at is None:
+                existing_pending.used_at = now
+
         db.add(
             StudentInvitationToken(
                 student_id=student.id,
                 user_id=portal_user.id,
                 token_hash=token_hash,
                 token_plain_tail=token_tail,
+                token_nonce=invitation_nonce,
                 expires_at=student_invitation_expires_at(),
                 used_at=None,
                 sent_count=new_sent_count,
                 created_by_admin_id=current_user.id,
                 email_sent_to=last_email_sent_to,
+                created_at=invitation_created_at,
             )
         )
-
-    db.commit()
+        db.commit()
 
     refreshed = db.scalar(
         select(Student)

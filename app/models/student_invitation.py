@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, Integer, String, text
+from sqlalchemy import BINARY, DateTime, ForeignKey, Integer, String, text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
@@ -17,6 +17,11 @@ class StudentInvitationToken(Base):
     la creación o edición de un alumno. El alumno canjea el token en la
     ruta pública `/auth/student-invitation/redeem` para establecer sus
     credenciales, verificar su correo y acceder a su perfil por primera vez.
+
+    Desde 2026-09-10 usa tokens determinísticos (HMAC). El campo
+    `token_nonce` almacena el nonce de 4 bytes necesario para
+    reconstruir el raw_token cuando el admin quiera volver a copiar
+    el enlace sin regenerarlo.
     """
 
     __tablename__ = "student_invitation_tokens"
@@ -40,6 +45,10 @@ class StudentInvitationToken(Base):
     )
     token_plain_tail: Mapped[str | None] = mapped_column(
         String(8),
+        nullable=True,
+    )
+    token_nonce: Mapped[bytes | None] = mapped_column(
+        BINARY(4),
         nullable=True,
     )
     expires_at: Mapped[datetime] = mapped_column(
