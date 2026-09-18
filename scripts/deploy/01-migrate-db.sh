@@ -152,7 +152,7 @@ if [[ -d "$MIGRATIONS_DIR" ]]; then
       log "  ✅ OK $base"
       APPLIED=$((APPLIED+1))
     else
-      if echo "$OUTPUT" | grep -qEi 'already exists|Duplicate entry|duplicate key|constraint.*already|does exist|Table .* already exists|Can.*t create|for key.*exists'; then
+      if echo "$OUTPUT" | grep -qEi 'already exists|Duplicate entry|Duplicate column name|duplicate key|constraint.*already|does exist|Table .* already exists|Can.*t create|for key.*exists|Duplicate.*key name'; then
         log "  ⚠️  Idempotent skip: $base (already present, nothing new)"
         SKIPPED=$((SKIPPED+1))
       else

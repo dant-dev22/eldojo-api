@@ -8,9 +8,36 @@
 -- token_nonce; cuando el admin intente copiar su link la capa de
 -- servicio detectará nonce=NULL y regenerará la invitación con nonce.
 --
--- Compatibilidad MySQL/MariaDB: el script 01-migrate-db.sh considera
--- "Duplicate column name" como skip idempotente, por lo que repetir
--- esta migración no es fatal.
+-- Idempotente: verifica INFORMATION_SCHEMA antes de añadir la columna.
 
-ALTER TABLE student_invitation_tokens
-    ADD COLUMN token_nonce BINARY(4) NULL AFTER token_plain_tail;
+DELIMITER $$
+
+DROP PROCEDURE IF EXISTS `_migrate_003_add_token_nonce`$$
+
+CREATE PROCEDURE `_migrate_003_add_token_nonce`()
+BEGIN
+    DECLARE _exists INT DEFAULT 0;
+
+    SELECT COUNT(*)
+    INTO _exists
+    FROM INFORMATION_SCHEMA.COLUMNS
+    WHERE TABLE_SCHEMA = DATABASE()
+      AND TABLE_NAME   = 'student_invitation_tokens'
+      AND COLUMN_NAME  = 'token_nonce'
+    LIMIT 1;
+
+    IF _exists = 0 THEN
+        SET @_sql003 = CONCAT(
+            'ALTER TABLE student_invitation_tokens ',
+            'ADD COLUMN token_nonce BINARY(4) NULL AFTER token_plain_tail'
+        );
+        PREPARE stmt003 FROM @_sql003;
+        EXECUTE stmt003;
+        DEALLOCATE PREPARE stmt003;
+    END IF;
+END$$
+
+DELIMITER ;
+
+CALL `_migrate_003_add_token_nonce`();
+DROP PROCEDURE IF EXISTS `_migrate_003_add_token_nonce`;
