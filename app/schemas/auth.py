@@ -161,6 +161,10 @@ class StudentInvitationPreviewResponse(BaseModel):
     suggested_email: str | None = None
     dojo_name: str | None = None
     expires_at: datetime | None = None
+    verification_code_sent: bool = False
+    verification_code_verified: bool = False
+    verification_code_expires_at: datetime | None = None
+    verification_code_masked_email: str | None = None
 
 
 class StudentInvitationRedeemRequest(BaseModel):
@@ -171,6 +175,7 @@ class StudentInvitationRedeemRequest(BaseModel):
     password: str = Field(min_length=8, max_length=128)
     confirm_password: str = Field(min_length=8, max_length=128)
     accept_terms: bool = Field(..., description="Aceptar términos de uso y privacidad")
+    challenge_token: str | None = Field(default=None, min_length=16, max_length=512)
 
     @field_validator("email")
     @classmethod
@@ -186,3 +191,30 @@ class StudentInvitationRedeemRequest(BaseModel):
         if not self.accept_terms:
             raise ValueError("Debes aceptar los términos para activar tu cuenta")
         return self
+
+
+class StudentInvitationVerifyCodeRequest(BaseModel):
+    """Payload para verificar el código OTP de 6 dígitos en la activación."""
+
+    token: str = Field(min_length=16, max_length=512)
+    code: str = Field(min_length=6, max_length=6)
+
+    @field_validator("code")
+    @classmethod
+    def normalize_code(cls, value: str) -> str:
+        """Quita espacios, guiones y padding no numérico del OTP y obliga 6 dígitos."""
+
+        if not value:
+            return value
+        cleaned = "".join(ch for ch in value if ch.isdigit())
+        if len(cleaned) != 6:
+            raise ValueError("El código debe tener exactamente 6 dígitos numéricos.")
+        return cleaned
+
+
+class StudentInvitationVerifyCodeResponse(BaseModel):
+    """Respuesta de verificación del código OTP."""
+
+    status: str
+    message: str
+    challenge_token: str | None = None

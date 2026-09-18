@@ -17,6 +17,7 @@ from app.core.mail import (
     MailDeliveryError,
     build_academy_confirmation_url,
     send_academy_confirmation_email,
+    send_student_verification_code_email,
 )
 from app.core.security import (
     create_access_token,
@@ -30,7 +31,10 @@ from app.core.security import (
 )
 from app.core.student_invitation import (
     find_pending_student_invitation_by_raw,
+    hash_student_verification_code,
     invalidate_student_invitations,
+    invalidate_verification_code_for_invitation,
+    issue_verification_code_for_invitation,
 )
 from app.db.session import get_db
 from app.models.academy_pending_session import AcademyPendingSession
@@ -54,6 +58,8 @@ from app.schemas.auth import (
     SessionTicketRedeemRequest,
     StudentInvitationPreviewResponse,
     StudentInvitationRedeemRequest,
+    StudentInvitationVerifyCodeRequest,
+    StudentInvitationVerifyCodeResponse,
     StudentRegisterRequest,
     TokenResponse,
     TutorialStateUpdateRequest,
@@ -63,6 +69,64 @@ from app.schemas.user import UserRead
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 PENDING_SESSION_POLLING_INTERVAL_SECONDS = 3
+
+
+def _mask_email(email: str | None) -> str | None:
+    """Enmascara un email para exhibirlo al frontend sin exponerlo completo.
+
+    Ej: "juan.perez@gmail.com" -> "j********@g****.com"
+    """
+
+    if not email or "@" not in email:
+        return email
+    local, domain = email.split("@", 1)
+    if len(local) <= 1:
+        masked_local = "*" * len(local)
+    else:
+        masked_local = local[0] + "*" * max(1, len(local) - 1)
+    if "." in domain:
+        domain_name, tld = domain.rsplit(".", 1)
+        if len(domain_name) <= 1:
+            masked_dn = "*" * len(domain_name)
+        else:
+            masked_dn = domain_name[0] + "*" * max(1, len(domain_name) - 1)
+        masked_domain = f"{masked_dn}.{tld}"
+    else:
+        masked_domain = "*" * len(domain)
+    return f"{masked_local}@{masked_domain}"
+
+
+def _build_challenge_token(invitation: StudentInvitationToken) -> str:
+    """Construye un token corto de un solo uso para pasar verify -> redeem.
+
+    Se implementa como SHA-256(id + verification_code_hash + verified_at + AUTH_SECRET_KEY)
+    y se valida en redeem contra la BD para evitar spoofing.
+    """
+
+    if invitation is None:
+        return ""
+    base = (
+        f"id={invitation.id};"
+        f"code_hash={getattr(invitation, 'verification_code_hash', '') or ''};"
+        f"verified_at={getattr(invitation, 'verification_code_verified_at', '') or ''};"
+        f"secret={settings.auth_secret_key}"
+    )
+    import hashlib
+
+    return hashlib.sha256(base.encode("utf-8")).hexdigest()
+
+
+def _validate_challenge_token(invitation: StudentInvitationToken, challenge_token: str | None) -> bool:
+    """Valida que challenge_token recibido coincida con el calculado de la fila."""
+
+    if not challenge_token:
+        return False
+    expected = _build_challenge_token(invitation)
+    if not expected:
+        return False
+    import hmac
+
+    return hmac.compare_digest(expected, challenge_token)
 
 
 def utc_now() -> datetime:
@@ -857,6 +921,21 @@ def preview_student_invitation(
         if user and not _is_placeholder_email(user.email):
             suggested_email = user.email
 
+    code_hash = getattr(invitation, "verification_code_hash", None)
+    code_expires = getattr(invitation, "verification_code_expires_at", None)
+    code_verified = getattr(invitation, "verification_code_verified_at", None)
+    code_sent = getattr(invitation, "verification_code_sent_at", None)
+    code_is_valid = (
+        code_hash is not None
+        and (code_expires is None or code_expires > now)
+        and code_verified is None
+        and code_sent is not None
+    )
+    code_masked_email = None
+    if code_is_valid:
+        email_for_mask = getattr(invitation, "email_sent_to", None) or suggested_email
+        code_masked_email = _mask_email(email_for_mask)
+
     return StudentInvitationPreviewResponse(
         status="valid",
         message="Activa tu cuenta y personaliza tu acceso al portal del alumno.",
@@ -866,7 +945,221 @@ def preview_student_invitation(
         suggested_email=suggested_email,
         dojo_name=dojo_name,
         expires_at=invitation.expires_at,
+        verification_code_sent=code_is_valid,
+        verification_code_verified=bool(code_verified),
+        verification_code_expires_at=code_expires if code_is_valid else None,
+        verification_code_masked_email=code_masked_email,
     )
+
+
+@router.post(
+    "/student-invitation/verify-code",
+    response_model=StudentInvitationVerifyCodeResponse,
+)
+def verify_student_invitation_code(
+    payload: StudentInvitationVerifyCodeRequest,
+    db: Session = Depends(get_db),
+) -> StudentInvitationVerifyCodeResponse:
+    """Valida el código OTP de 6 dígitos para una invitación.
+
+    Estados (status):
+      - invalid_token  -> 404, el token no existe / usado / expiró.
+      - code_required  -> 422, esta invitación NO requiere código (legacy).
+      - expired_code   -> 410, el código venció, hay que reenviar.
+      - wrong_code     -> 401, el código ingresado no coincide.
+      - already_verified -> 409, el código ya fue usado.
+      - ok             -> 200, código validado; devuelve challenge_token.
+    """
+
+    invitation = _find_invitation_by_raw(db, payload.token)
+    now = utc_now()
+
+    if invitation is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="El enlace de activación no es válido.",
+        )
+    if invitation.used_at is not None:
+        raise HTTPException(
+            status_code=status.HTTP_410_GONE,
+            detail="Este enlace de activación ya fue utilizado.",
+        )
+    if invitation.expires_at is not None and invitation.expires_at <= now:
+        raise HTTPException(
+            status_code=status.HTTP_410_GONE,
+            detail="Este enlace de activación ha expirado. Pide a tu dojo que te reenvíe uno nuevo.",
+        )
+
+    code_hash = getattr(invitation, "verification_code_hash", None)
+    code_expires = getattr(invitation, "verification_code_expires_at", None)
+    code_verified = getattr(invitation, "verification_code_verified_at", None)
+
+    if code_hash is None:
+        return StudentInvitationVerifyCodeResponse(
+            status="code_required",
+            message="Esta invitación no requiere verificación de código.",
+        )
+
+    if code_verified is not None:
+        return StudentInvitationVerifyCodeResponse(
+            status="already_verified",
+            message="El código ya fue verificado. Puedes activar tu cuenta.",
+            challenge_token=_build_challenge_token(invitation),
+        )
+
+    if code_expires is not None and code_expires <= now:
+        raise HTTPException(
+            status_code=status.HTTP_410_GONE,
+            detail="El código de activación venció. Puedes reenviarlo.",
+        )
+
+    if not payload.code:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Debes ingresar el código de 6 dígitos.",
+        )
+
+    incoming_hash = hash_student_verification_code(payload.code)
+    import hmac as _hmac
+
+    if not _hmac.compare_digest(incoming_hash, code_hash):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Código incorrecto. Revísalo o solicita reenvío.",
+        )
+
+    invitation.verification_code_verified_at = now
+    db.commit()
+    db.refresh(invitation)
+
+    return StudentInvitationVerifyCodeResponse(
+        status="ok",
+        message="Código confirmado. Continúa para activar tu cuenta.",
+        challenge_token=_build_challenge_token(invitation),
+    )
+
+
+@router.post(
+    "/student-invitation/resend-code",
+    response_model=StudentInvitationVerifyCodeResponse,
+)
+def resend_student_invitation_code(
+    payload: StudentInvitationVerifyCodeRequest,
+    db: Session = Depends(get_db),
+) -> StudentInvitationVerifyCodeResponse:
+    """Reenvía (regenera) el código OTP al email asociado a la invitación.
+
+    Payload mínimo: { token }. El campo `code` se ignora (pero se permite
+    para reutilizar el schema Request normalizado).
+
+    Safety:
+      - Cooldown mínimo de 60 segundos entre reenvíos (mismo invitation_id).
+      - Si el código aún es válido y le quedan >23h de vida, se reenvía el
+        mismo código (no se regenera) para evitar race conditions.
+    """
+
+    invitation = _find_invitation_by_raw(db, payload.token)
+    now = utc_now()
+
+    if invitation is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="El enlace de activación no es válido.",
+        )
+    if invitation.used_at is not None:
+        raise HTTPException(
+            status_code=status.HTTP_410_GONE,
+            detail="Este enlace de activación ya fue utilizado.",
+        )
+    if invitation.expires_at is not None and invitation.expires_at <= now:
+        raise HTTPException(
+            status_code=status.HTTP_410_GONE,
+            detail="Este enlace de activación ha expirado. Pide a tu dojo que te reenvíe uno nuevo.",
+        )
+
+    RESEND_COOLDOWN_SECONDS = 60
+    last_sent = getattr(invitation, "verification_code_sent_at", None)
+    if last_sent is not None:
+        delta_seconds = (now - last_sent).total_seconds()
+        if delta_seconds < RESEND_COOLDOWN_SECONDS:
+            wait_seconds = int(RESEND_COOLDOWN_SECONDS - delta_seconds) + 1
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail=f"Espera {wait_seconds} segundos antes de volver a solicitar el código.",
+            )
+
+    # Obtener datos para correo
+    student = db.get(Student, invitation.student_id)
+    organization = db.get(Organization, student.organization_id) if student else None
+    dojo_name = getattr(organization, "name", None) if organization else None
+    recipient_name = None
+    if student:
+        candidate = f"{getattr(student, 'first_name', '') or ''} {getattr(student, 'last_name', '') or ''}".strip()
+        recipient_name = candidate or None
+
+    ttl_hours = int(settings.student_verification_code_expire_hours or 24)
+    if ttl_hours <= 0:
+        ttl_hours = 24
+
+    # Si el código actual es válido y le quedan >TTL-1h, reutilizarlo para no invalidar el que ya recibió el usuario
+    code_hash = getattr(invitation, "verification_code_hash", None)
+    code_expires = getattr(invitation, "verification_code_expires_at", None)
+    reuse_existing = False
+    if (
+        code_hash is not None
+        and code_expires is not None
+        and code_expires > now
+        and (code_expires - now).total_seconds() > (ttl_hours - 1) * 3600
+    ):
+        reuse_existing = True
+
+    code_plain: str | None = None
+    recipient_email: str | None = None
+
+    if reuse_existing:
+        recipient_email = _resolve_student_recipient_email_safe(db, invitation)
+        code_plain = None  # no se puede revertir el hash; reenviar sin persistir sería inconsistente → se regenera seguro a continuación
+        reuse_existing = False
+
+    # Siempre emitimos un código nuevo y limpio para garantizar que SMTP reciba un código plano válido
+    if not reuse_existing:
+        invalidate_verification_code_for_invitation(invitation)
+        code_plain, recipient_email = issue_verification_code_for_invitation(db, invitation)
+
+    mail_ok = False
+    if code_plain and recipient_email:
+        mail_ok = send_student_verification_code_email(
+            recipient_email=recipient_email,
+            recipient_name=recipient_name,
+            dojo_name=dojo_name,
+            code=code_plain,
+            expires_hours=ttl_hours,
+        )
+
+    if mail_ok and recipient_email:
+        if invitation.email_sent_to != recipient_email:
+            invitation.email_sent_to = recipient_email
+        db.commit()
+        return StudentInvitationVerifyCodeResponse(
+            status="ok",
+            message=f"Hemos reenviado el código a {_mask_email(recipient_email)}. Revisa tu bandeja.",
+        )
+
+    # Fail-open: no se pudo enviar, limpiar campos y no requerir código
+    invalidate_verification_code_for_invitation(invitation)
+    db.commit()
+    return StudentInvitationVerifyCodeResponse(
+        status="code_required",
+        message="No fue posible reenviar el código en este momento. Puedes continuar sin verificación.",
+    )
+
+
+def _resolve_student_recipient_email_safe(
+    db: Session, invitation: StudentInvitationToken
+) -> str | None:
+    """Wrapper thread-safe para reutilizar lógica de resolución de email."""
+    from app.core.student_invitation import _resolve_student_recipient_email
+    return _resolve_student_recipient_email(db, invitation)
 
 
 @router.post("/student-invitation/redeem", response_model=TokenResponse)
@@ -899,6 +1192,22 @@ def redeem_student_invitation(
             status_code=status.HTTP_410_GONE,
             detail="Este enlace de activación ha expirado. Pide a tu dojo que te reenvíe uno nuevo.",
         )
+
+    code_hash = getattr(invitation, "verification_code_hash", None)
+    if code_hash is not None:
+        code_verified = getattr(invitation, "verification_code_verified_at", None)
+        code_expires = getattr(invitation, "verification_code_expires_at", None)
+        challenge_ok = _validate_challenge_token(invitation, payload.challenge_token)
+        if code_verified is None and not challenge_ok:
+            if code_expires is not None and code_expires <= now:
+                raise HTTPException(
+                    status_code=status.HTTP_410_GONE,
+                    detail="El código de activación venció. Reenvíalo para continuar.",
+                )
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Debes verificar el código de activación que enviamos a tu correo antes de activar tu cuenta.",
+            )
 
     if invitation.user_id is None:
         raise HTTPException(

@@ -48,6 +48,8 @@ class StudentPortalAccessStatus(BaseModel):
     invitation_email_sent_to: str | None = None
     invitation_status: StudentPortalInvitationStatus = StudentPortalInvitationStatus.NONE
     invitation_can_reconstruct: bool = False
+    verification_code_sent: bool = False
+    verification_code_sent_to_email: str | None = None
 
 
 class StudentBase(BaseModel):

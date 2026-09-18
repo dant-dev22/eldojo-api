@@ -73,6 +73,27 @@ class StudentInvitationToken(Base):
         String(255),
         nullable=True,
     )
+    verification_code_hash: Mapped[str | None] = mapped_column(
+        String(64),
+        nullable=True,
+        index=True,
+    )
+    verification_code_plain_tail: Mapped[str | None] = mapped_column(
+        String(4),
+        nullable=True,
+    )
+    verification_code_sent_at: Mapped[datetime | None] = mapped_column(
+        DateTime(),
+        nullable=True,
+    )
+    verification_code_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(),
+        nullable=True,
+    )
+    verification_code_verified_at: Mapped[datetime | None] = mapped_column(
+        DateTime(),
+        nullable=True,
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(),
         nullable=False,

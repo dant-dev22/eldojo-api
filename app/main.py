@@ -24,6 +24,8 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["Content-Type", "Content-Length", "Authorization", "X-Request-ID"],
+    max_age=3600,
 )
 
 settings.uploads_dir.mkdir(parents=True, exist_ok=True)

@@ -189,6 +189,131 @@ def build_student_invitation_link(raw_token: str) -> str:
     return f"{base}{separator}{urlencode({'token': raw_token})}"
 
 
+STUDENT_VERIFICATION_CODE_DIGITS: int = 6
+STUDENT_VERIFICATION_CODE_PLAIN_TAIL_LENGTH: int = 4
+
+
+def generate_student_verification_code() -> str:
+    """Genera un código numérico aleatorio de 6 dígitos (000000-999999)."""
+
+    return "".join(
+        str(secrets.randbelow(10))
+        for _ in range(STUDENT_VERIFICATION_CODE_DIGITS)
+    )
+
+
+def hash_student_verification_code(code: str) -> str:
+    """Hashea un código OTP con SHA-256 hex (reutiliza el mismo wrapper que tokens)."""
+
+    from app.core.security import hash_email_verification_token
+
+    if not code:
+        raise ValueError("code no puede estar vacío")
+    return hash_email_verification_token(code)
+
+
+def _resolve_student_recipient_email(
+    db: Session,
+    invitation: StudentInvitationToken,
+) -> str | None:
+    """Resuelve el email destinatario para el código de verificación.
+
+    Orden de prioridad (coincide con flujo preview/redeem):
+      1) invitation.email_sent_to (último email reportado al enviar link)
+      2) student.email (lo que el admin cargó en la ficha del alumno)
+      3) user.email NO placeholder (no termina en @pendiente.eldojo.tech)
+    """
+
+    candidate: str | None = getattr(invitation, "email_sent_to", None)
+    if candidate and candidate.strip():
+        return candidate.strip().lower()
+
+    from app.models.student import Student
+
+    student = db.get(Student, invitation.student_id)
+    if student is not None:
+        candidate = getattr(student, "email", None)
+        if candidate and candidate.strip():
+            return candidate.strip().lower()
+
+    if invitation.user_id:
+        from app.models.user import User
+
+        user = db.get(User, invitation.user_id)
+        if user is not None and getattr(user, "email", None):
+            email = user.email.strip()
+            if not email.lower().endswith("@pendiente.eldojo.tech"):
+                return email.lower()
+    return None
+
+
+def issue_verification_code_for_invitation(
+    db: Session,
+    invitation: StudentInvitationToken,
+) -> tuple[str | None, str | None]:
+    """Genera y persiste un código OTP para una invitación.
+
+    IMPORTANTE (fail-open): Esta función SOLO escribe los campos en la
+    fila si el caller confirma después que `send_mail()` devolvió True.
+    Para eso se retorna (code_plain, recipient_email) y el caller decide
+    si hacer commit de los cambios o revertirlos (set a NULL).
+
+    Returns
+    -------
+    (code_plain: str | None, recipient_email: str | None)
+        Si no se pudo resolver email válido: (None, None)
+        Si se pudo: código plano de 6 dígitos + email destinatario normalizado.
+        Los campos ORM quedan populados PERO el caller DEBE hacer db.commit()
+        SOLAMENTE si el envío de correo fue exitoso. Si falla, debe limpiar:
+            invitation.verification_code_hash = None
+            invitation.verification_code_plain_tail = None
+            etc.
+    """
+
+    if invitation is None:
+        return None, None
+
+    recipient = _resolve_student_recipient_email(db, invitation)
+    if recipient is None:
+        return None, None
+
+    ttl_hours = int(settings.student_verification_code_expire_hours or 24)
+    if ttl_hours <= 0:
+        ttl_hours = 24
+
+    code_plain = generate_student_verification_code()
+    code_hash = hash_student_verification_code(code_plain)
+
+    tail_len = STUDENT_VERIFICATION_CODE_PLAIN_TAIL_LENGTH
+    if len(code_plain) >= tail_len:
+        tail = code_plain[-tail_len:]
+    else:
+        tail = code_plain
+
+    now = _utc_now_naive()
+    expires = now + timedelta(hours=ttl_hours)
+
+    invitation.verification_code_hash = code_hash
+    invitation.verification_code_plain_tail = tail
+    invitation.verification_code_sent_at = now
+    invitation.verification_code_expires_at = expires
+    invitation.verification_code_verified_at = None
+
+    return code_plain, recipient
+
+
+def invalidate_verification_code_for_invitation(
+    invitation: StudentInvitationToken,
+) -> None:
+    """Limpia todos los campos del código OTP (rollback / invalida)."""
+
+    invitation.verification_code_hash = None
+    invitation.verification_code_plain_tail = None
+    invitation.verification_code_sent_at = None
+    invitation.verification_code_expires_at = None
+    invitation.verification_code_verified_at = None
+
+
 def invalidate_student_invitations(
     db: Session,
     *,

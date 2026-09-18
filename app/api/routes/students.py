@@ -14,12 +14,15 @@ from app.api.dependencies import require_active_user
 from app.core.authorization import ensure_can_access_operational_scope, scope_branch_filter
 from app.core.security import hash_password
 from app.core.student_codes import build_student_unique_code
+from app.core.mail import send_student_verification_code_email
 from app.core.student_invitation import (
     STUDENT_INVITATION_NONCE_BYTES,
     build_student_invitation_link,
     generate_deterministic_student_invitation_token,
     generate_student_invitation_nonce,
     invalidate_student_invitations,
+    invalidate_verification_code_for_invitation,
+    issue_verification_code_for_invitation,
     reconstruct_student_invitation_token,
     student_invitation_expires_at,
 )
@@ -188,6 +191,20 @@ def _populate_portal_access_status(
         status_obj.invitation_sent_count = int(latest_invitation.sent_count or 0)
         status_obj.invitation_email_sent_to = latest_invitation.email_sent_to
         status_obj.invitation_can_reconstruct = bool(reconstructed_raw)
+
+        code_hash = getattr(latest_invitation, "verification_code_hash", None)
+        code_expires = getattr(latest_invitation, "verification_code_expires_at", None)
+        code_is_valid = (
+            code_hash is not None
+            and (code_expires is None or code_expires > now)
+            and getattr(latest_invitation, "verification_code_verified_at", None) is None
+        )
+        if code_is_valid:
+            status_obj.verification_code_sent = True
+            status_obj.verification_code_sent_to_email = latest_invitation.email_sent_to
+        else:
+            status_obj.verification_code_sent = False
+            status_obj.verification_code_sent_to_email = None
 
     # === Calcular invitation_status ===
     if has_linked_active_user:
@@ -835,6 +852,53 @@ def resend_student_invitation(
             )
         )
         db.commit()
+
+    # ===== Emitir y enviar código OTP de verificación (fail-open) =====
+    latest_inv_after = db.scalar(
+        select(StudentInvitationToken)
+        .where(StudentInvitationToken.student_id == student.id)
+        .order_by(StudentInvitationToken.created_at.desc(), StudentInvitationToken.id.desc())
+        .limit(1)
+    )
+    if latest_inv_after is not None and latest_inv_after.used_at is None:
+        organization = db.get(Organization, student.organization_id)
+        dojo_name = getattr(organization, "name", None) if organization else None
+        recipient_name = (
+            f"{student.first_name} {student.last_name}".strip()
+            if student.first_name or student.last_name
+            else None
+        )
+
+        code_hash_now = getattr(latest_inv_after, "verification_code_hash", None)
+        code_expires_now = getattr(latest_inv_after, "verification_code_expires_at", None)
+        code_verified_now = getattr(latest_inv_after, "verification_code_verified_at", None)
+        code_valid_now = (
+            code_hash_now is not None
+            and (code_expires_now is None or code_expires_now > now)
+            and code_verified_now is None
+        )
+
+        if not code_valid_now:
+            code_plain, recipient_email = issue_verification_code_for_invitation(db, latest_inv_after)
+            mail_ok = False
+            ttl_hours = int(settings.student_verification_code_expire_hours or 24)
+            if ttl_hours <= 0:
+                ttl_hours = 24
+            if code_plain and recipient_email:
+                mail_ok = send_student_verification_code_email(
+                    recipient_email=recipient_email,
+                    recipient_name=recipient_name,
+                    dojo_name=dojo_name,
+                    code=code_plain,
+                    expires_hours=ttl_hours,
+                )
+            if mail_ok and recipient_email:
+                if latest_inv_after.email_sent_to != recipient_email:
+                    latest_inv_after.email_sent_to = recipient_email
+                db.commit()
+            else:
+                invalidate_verification_code_for_invitation(latest_inv_after)
+                db.commit()
 
     refreshed = db.scalar(
         select(Student)

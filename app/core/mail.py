@@ -78,3 +78,66 @@ def send_academy_confirmation_email(*, recipient_email: str, recipient_name: str
             smtp.send_message(message)
     except (OSError, smtplib.SMTPException) as exc:
         raise MailDeliveryError("No fue posible enviar el correo de confirmación") from exc
+
+
+def send_student_verification_code_email(
+    *,
+    recipient_email: str,
+    recipient_name: str | None,
+    dojo_name: str | None,
+    code: str,
+    expires_hours: int = 24,
+) -> bool:
+    """Envía el correo con el código OTP de 6 dígitos para activar portal alumno.
+
+    Fail-open: devuelve True si se entregó, False si no (SMTP no configurado,
+    error de red, timeout, etc.). El caller debe interpretar False y caer en
+    flujo legacy (no requerir código, permitir redeem directo).
+    """
+
+    if not recipient_email or not code:
+        return False
+
+    try:
+        smtp_host, smtp_port, smtp_username, smtp_password, from_email = _require_mail_settings()
+    except MailDeliveryError:
+        return False
+
+    greeting_name = recipient_name.strip() if recipient_name and recipient_name.strip() else "alumno"
+    dojo_label = dojo_name.strip() if dojo_name and dojo_name.strip() else "tu dojo"
+    ttl = int(expires_hours or 24)
+    if ttl <= 0:
+        ttl = 24
+
+    message = EmailMessage()
+    message["From"] = (
+        f"{settings.smtp_from_name} <{from_email}>"
+        if settings.smtp_from_name
+        else from_email
+    )
+    message["To"] = recipient_email
+    message["Subject"] = f"Tu código de activación de ElDojo: {code}"
+    message.set_content(
+        "\n".join(
+            [
+                f"Hola {greeting_name},",
+                "",
+                f"{dojo_label.capitalize()} te invitó a activar tu cuenta del portal del alumno.",
+                "",
+                "Ingresa el siguiente código en la pantalla de activación para confirmar tu identidad:",
+                "",
+                f"  CÓDIGO:  {code}",
+                "",
+                f"Este código vence en {ttl} horas y solo puede usarse una vez.",
+                "Si no solicitaste activar tu cuenta, puedes ignorar este mensaje.",
+            ]
+        )
+    )
+
+    try:
+        with smtplib.SMTP_SSL(smtp_host, smtp_port) as smtp:
+            smtp.login(smtp_username, smtp_password)
+            smtp.send_message(message)
+        return True
+    except (OSError, smtplib.SMTPException):
+        return False

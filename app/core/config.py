@@ -63,6 +63,15 @@ class Settings:
         "ACADEMY_VERIFICATION_URL_BASE",
         "https://eldojo.tech/confirmar-cuenta",
     )
+    academy_verification_token_expire_hours: int = int(
+        os.getenv("ACADEMY_VERIFICATION_TOKEN_EXPIRE_HOURS", "48")
+    )
+    academy_pending_session_expire_hours: int = int(
+        os.getenv("ACADEMY_PENDING_SESSION_EXPIRE_HOURS", "24")
+    )
+    student_verification_code_expire_hours: int = int(
+        os.getenv("STUDENT_VERIFICATION_CODE_EXPIRE_HOURS", "24")
+    )
     smtp_host: str | None = os.getenv("SMTP_HOST")
     smtp_port: int = int(os.getenv("SMTP_PORT", "465"))
     smtp_username: str | None = os.getenv("SMTP_USERNAME")
@@ -70,10 +79,12 @@ class Settings:
     smtp_from_email: str | None = os.getenv("SMTP_FROM_EMAIL")
     smtp_from_name: str = os.getenv("SMTP_FROM_NAME", "ElDojo")
     backend_cors_origins: list[str] = field(
-        default_factory=lambda: as_list(
-            os.getenv(
-                "BACKEND_CORS_ORIGINS",
-                "https://eldojo.tech,https://www.eldojo.tech,https://app.eldojo.tech,https://admin.eldojo.tech,https://mi.eldojo.tech,http://localhost:8081,http://127.0.0.1:8081,http://localhost:8082,http://127.0.0.1:8082,http://localhost:19006,http://127.0.0.1:19006,http://localhost:3000,http://127.0.0.1:3000",
+        default_factory=lambda: _normalize_cors_origins(
+            as_list(
+                os.getenv(
+                    "BACKEND_CORS_ORIGINS",
+                    "https://eldojo.tech,https://www.eldojo.tech,https://app.eldojo.tech,https://www.app.eldojo.tech,https://admin.eldojo.tech,https://www.admin.eldojo.tech,https://mi.eldojo.tech,https://www.mi.eldojo.tech,http://localhost:8081,http://127.0.0.1:8081,http://localhost:8082,http://127.0.0.1:8082,http://localhost:19006,http://127.0.0.1:19006,http://localhost:3000,http://127.0.0.1:3000",
+                )
             )
         )
     )
@@ -84,6 +95,62 @@ class Settings:
     session_ticket_ttl_seconds: int = int(os.getenv("SESSION_TICKET_TTL_SECONDS", "30"))
     uploads_dir: Path = Path(os.getenv("UPLOADS_DIR", str(BASE_DIR / "uploads")))
     uploads_url_prefix: str = os.getenv("UPLOADS_URL_PREFIX", "/uploads")
+
+
+def _normalize_cors_origins(raw: list[str]) -> list[str]:
+    """Normaliza y valida origins CORS: quita trailing /, filtra inválidos.
+
+    En producción, filtra automáticamente localhost / 127.0.0.1 para evitar
+    dejar expuestos origins de dev por error.
+    """
+
+    if not raw:
+        return []
+
+    from urllib.parse import urlparse
+
+    _env_prod = (
+        (os.getenv("APP_ENV") or "").strip().lower() == "production"
+        or (os.getenv("APP_DEBUG") or "").strip().lower() in {"0", "false", "no", "off"}
+    )
+
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for item in raw:
+        if not item or not isinstance(item, str):
+            continue
+        candidate = item.strip().rstrip("/")
+        if not candidate:
+            continue
+
+        try:
+            parsed = urlparse(candidate)
+        except Exception:
+            continue
+
+        scheme = (parsed.scheme or "").lower()
+        hostname = (parsed.hostname or "").lower()
+        if scheme not in {"http", "https"}:
+            continue
+        if not hostname:
+            continue
+
+        is_localhost = hostname in {"localhost", "127.0.0.1", "0.0.0.0"} or hostname.endswith(
+            ".local"
+        )
+        if _env_prod and is_localhost:
+            continue
+
+        port = parsed.port
+        if port:
+            final = f"{scheme}://{hostname}:{port}"
+        else:
+            final = f"{scheme}://{hostname}"
+
+        if final not in seen:
+            seen.add(final)
+            normalized.append(final)
+    return normalized
 
 
 settings = Settings()
