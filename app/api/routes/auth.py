@@ -1193,22 +1193,6 @@ def redeem_student_invitation(
             detail="Este enlace de activación ha expirado. Pide a tu dojo que te reenvíe uno nuevo.",
         )
 
-    code_hash = getattr(invitation, "verification_code_hash", None)
-    if code_hash is not None:
-        code_verified = getattr(invitation, "verification_code_verified_at", None)
-        code_expires = getattr(invitation, "verification_code_expires_at", None)
-        challenge_ok = _validate_challenge_token(invitation, payload.challenge_token)
-        if code_verified is None and not challenge_ok:
-            if code_expires is not None and code_expires <= now:
-                raise HTTPException(
-                    status_code=status.HTTP_410_GONE,
-                    detail="El código de activación venció. Reenvíalo para continuar.",
-                )
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail="Debes verificar el código de activación que enviamos a tu correo antes de activar tu cuenta.",
-            )
-
     if invitation.user_id is None:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -1228,15 +1212,27 @@ def redeem_student_invitation(
             detail="El acceso al portal fue revocado por tu dojo.",
         )
 
+    expected_final_email: str | None = None
+    if invitation.email_sent_to:
+        expected_final_email = invitation.email_sent_to
+    elif student.email:
+        expected_final_email = student.email
+    elif not _is_placeholder_email(user.email):
+        expected_final_email = user.email
+
     final_email: str | None = None
     if payload.email:
-        final_email = payload.email
-    elif invitation.email_sent_to:
-        final_email = invitation.email_sent_to
-    elif student.email:
-        final_email = student.email
-    elif not _is_placeholder_email(user.email):
-        final_email = user.email
+        if expected_final_email is None:
+            final_email = payload.email
+        else:
+            if payload.email.strip().lower() != expected_final_email.strip().lower():
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail="El correo proporcionado no coincide con el registrado en el dojo.",
+                )
+            final_email = payload.email
+    else:
+        final_email = expected_final_email
 
     if final_email is None:
         raise HTTPException(

@@ -14,7 +14,8 @@ from app.api.dependencies import require_active_user
 from app.core.authorization import ensure_can_access_operational_scope, scope_branch_filter
 from app.core.security import hash_password
 from app.core.student_codes import build_student_unique_code
-from app.core.mail import send_student_verification_code_email
+from app.core.mail import send_student_invitation_link_email, send_student_verification_code_email
+from app.core.config import settings
 from app.core.student_invitation import (
     STUDENT_INVITATION_NONCE_BYTES,
     build_student_invitation_link,
@@ -474,6 +475,36 @@ def create_student(
             generated_raw_token = raw_token
 
         db.commit()
+
+        if should_enable_portal and generated_raw_token and payload.student_email:
+            organization = db.get(Organization, payload.organization_id)
+            dojo_name = getattr(organization, "name", None) if organization else None
+            recipient_name = (
+                f"{student.first_name} {student.last_name}".strip()
+                if student.first_name or student.last_name
+                else None
+            )
+            invitation_link = build_student_invitation_link(generated_raw_token)
+            ttl_hours = int(getattr(settings, "student_invitation_token_expire_days", None) or 0) * 24
+            if ttl_hours <= 0:
+                ttl_hours = 48
+            mail_ok = send_student_invitation_link_email(
+                recipient_email=payload.student_email,
+                recipient_name=recipient_name,
+                dojo_name=dojo_name,
+                invitation_link=invitation_link,
+                expires_hours=ttl_hours,
+            )
+            if mail_ok:
+                latest_inv = db.scalar(
+                    select(StudentInvitationToken)
+                    .where(StudentInvitationToken.student_id == student.id)
+                    .order_by(StudentInvitationToken.created_at.desc(), StudentInvitationToken.id.desc())
+                    .limit(1)
+                )
+                if latest_inv is not None and latest_inv.email_sent_to != payload.student_email:
+                    latest_inv.email_sent_to = payload.student_email
+                    db.commit()
     except IntegrityError as exc:
         db.rollback()
         raise HTTPException(
@@ -853,14 +884,14 @@ def resend_student_invitation(
         )
         db.commit()
 
-    # ===== Emitir y enviar código OTP de verificación (fail-open) =====
+    # ===== Enviar correo con link de invitación (fail-open) =====
     latest_inv_after = db.scalar(
         select(StudentInvitationToken)
         .where(StudentInvitationToken.student_id == student.id)
         .order_by(StudentInvitationToken.created_at.desc(), StudentInvitationToken.id.desc())
         .limit(1)
     )
-    if latest_inv_after is not None and latest_inv_after.used_at is None:
+    if latest_inv_after is not None and latest_inv_after.used_at is None and raw_token:
         organization = db.get(Organization, student.organization_id)
         dojo_name = getattr(organization, "name", None) if organization else None
         recipient_name = (
@@ -868,36 +899,26 @@ def resend_student_invitation(
             if student.first_name or student.last_name
             else None
         )
-
-        code_hash_now = getattr(latest_inv_after, "verification_code_hash", None)
-        code_expires_now = getattr(latest_inv_after, "verification_code_expires_at", None)
-        code_verified_now = getattr(latest_inv_after, "verification_code_verified_at", None)
-        code_valid_now = (
-            code_hash_now is not None
-            and (code_expires_now is None or code_expires_now > now)
-            and code_verified_now is None
+        recipient_email = (
+            getattr(latest_inv_after, "email_sent_to", None)
+            or getattr(student, "email", None)
+            or None
         )
-
-        if not code_valid_now:
-            code_plain, recipient_email = issue_verification_code_for_invitation(db, latest_inv_after)
-            mail_ok = False
-            ttl_hours = int(settings.student_verification_code_expire_hours or 24)
+        if recipient_email:
+            invitation_link = build_student_invitation_link(raw_token)
+            ttl_hours = int(getattr(settings, "student_invitation_token_expire_days", None) or 0) * 24
             if ttl_hours <= 0:
-                ttl_hours = 24
-            if code_plain and recipient_email:
-                mail_ok = send_student_verification_code_email(
-                    recipient_email=recipient_email,
-                    recipient_name=recipient_name,
-                    dojo_name=dojo_name,
-                    code=code_plain,
-                    expires_hours=ttl_hours,
-                )
-            if mail_ok and recipient_email:
+                ttl_hours = 48
+            mail_ok = send_student_invitation_link_email(
+                recipient_email=recipient_email,
+                recipient_name=recipient_name,
+                dojo_name=dojo_name,
+                invitation_link=invitation_link,
+                expires_hours=ttl_hours,
+            )
+            if mail_ok:
                 if latest_inv_after.email_sent_to != recipient_email:
                     latest_inv_after.email_sent_to = recipient_email
-                db.commit()
-            else:
-                invalidate_verification_code_for_invitation(latest_inv_after)
                 db.commit()
 
     refreshed = db.scalar(
