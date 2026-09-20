@@ -312,7 +312,7 @@ def _purge_org_student_data(db: Session, org_ids: list[int], branch_ids: list[in
     ]
 
     if user_ids:
-        _DELETES.append(("users", delete(User).where(User.id.in_(user_ids), User.role == UserRole.STUDENT)))
+        _DELETES.append(("users", delete(User).where(User.id.in_(user_ids), User.role == UserRole.STUDENT.value)))
 
     for name, stmt in _DELETES:
         if stmt is None:
@@ -465,7 +465,7 @@ def _create_one_student(
         last_name=last_name.split(" ")[0],
         email=email,
         password_hash=hash_password(STUDENT_PASSWORD_RAW),
-        role=UserRole.STUDENT,
+        role=UserRole.STUDENT.value,
         is_active=True,
         email_verified_at=datetime.utcnow(),
         first_time=False,
@@ -490,8 +490,8 @@ def _create_one_student(
         monthly_fee=Decimal("1500.00"),
         currency="MXN",
         next_payment_date=next_pay_dt,
-        payment_status=PaymentStatus.UP_TO_DATE,
-        status=StudentStatus.ACTIVE,
+        payment_status=PaymentStatus.UP_TO_DATE.value,
+        status=StudentStatus.ACTIVE.value,
         current_belt_level_id=belt_blue_id if index == 0 else belt_white_id,
         current_stripe_id=stripe_2_id if index == 0 else None,
         guardian_name="Maria de los Angeles Ruiz" if is_minor else None,
@@ -530,8 +530,8 @@ def _create_one_student(
                 period_start=period_start,
                 period_end=period_end,
                 paid_at=datetime.combine(period_start, time(9, 30)) + timedelta(days=2),
-                method=PaymentMethod.TRANSFER,
-                status=PaymentRecordStatus.PAID,
+                method=PaymentMethod.TRANSFER.value,
+                status=PaymentRecordStatus.PAID.value,
                 recorded_by=admin.id,
                 notes="Pago mensual - Colegiatura regular",
             )
@@ -545,7 +545,7 @@ def _create_one_student(
                 class_id=at_class.id,
                 branch_id=branch.id,
                 check_in_at=datetime.now() - timedelta(days=day_off, hours=2),
-                method=AttendanceMethod.QR,
+                method=AttendanceMethod.QR.value,
                 registered_by=admin.id,
             )
         )
@@ -654,9 +654,9 @@ def _create_one_student(
         )
 
     fight_data = [
-        (FightRecordType.VICTORY, "Rival Prueba A", enroll_dt + timedelta(days=45)),
-        (FightRecordType.DRAW,    "Rival Prueba B", enroll_dt + timedelta(days=75)),
-        (FightRecordType.LOSS,    "Rival Prueba C", enroll_dt + timedelta(days=95)),
+        (FightRecordType.VICTORY.value, "Rival Prueba A", enroll_dt + timedelta(days=45)),
+        (FightRecordType.DRAW.value,    "Rival Prueba B", enroll_dt + timedelta(days=75)),
+        (FightRecordType.LOSS.value,    "Rival Prueba C", enroll_dt + timedelta(days=95)),
     ]
     for rtype, opp, fdate in fight_data:
         db.add(
