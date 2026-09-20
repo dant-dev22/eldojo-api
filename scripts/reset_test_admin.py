@@ -114,7 +114,7 @@ def _bootstrap_or_die() -> None:
 _bootstrap_or_die()
 
 
-from sqlalchemy import delete, select  # noqa: E402
+from sqlalchemy import delete, select, update  # noqa: E402
 from sqlalchemy.orm import Session  # noqa: E402
 
 from app.core.security import hash_password  # noqa: E402
@@ -215,7 +215,15 @@ def _fetch_admin_ctx(db: Session) -> tuple[Optional[User], list[Organization], l
 
 def _purge_org_student_data(db: Session, org_ids: list[int], branch_ids: list[int]) -> dict[str, int]:
     """Elimina (hard-delete via DELETE) TODOS los datos de alumnos y clases
-    asociados a las organizaciones indicadas. Devuelve conteos."""
+    asociados a las organizaciones indicadas. Devuelve conteos.
+
+    Para MySQL con FKs ON DELETE RESTRICT se necesita:
+      1) UNLINK previo (UPDATE ... SET fk_col = NULL) de todo RESTRICT
+         que apunte a tablas que vamos a borrar.
+      2) Orden de DELETE: HIJAS antes que PADRES.
+         Students se BORRA ANTES que classes (students.primary_class_id
+         tiene FK RESTRICT hacia classes.id).
+    """
     if not org_ids:
         return {}
     counts: dict[str, int] = {}
@@ -231,6 +239,61 @@ def _purge_org_student_data(db: Session, org_ids: list[int], branch_ids: list[in
     class_ids_stmt = select(MartialClass.id).where(MartialClass.organization_id.in_(org_ids))
     class_ids = list(db.scalars(class_ids_stmt).all())
 
+    if student_ids:
+        _UNLINKS = [
+            (
+                "unlink students.primary_class/current_belt/stripe/user",
+                update(Student)
+                .where(Student.id.in_(student_ids))
+                .values(
+                    primary_class_id=None,
+                    current_belt_level_id=None,
+                    current_stripe_id=None,
+                    user_id=None,
+                ),
+            ),
+            (
+                "unlink student_belt_histories.awarded_by_user",
+                update(StudentBeltHistory)
+                .where(StudentBeltHistory.student_id.in_(student_ids))
+                .values(awarded_by_user_id=None),
+            ),
+            (
+                "unlink trajectory_events.created_by_user",
+                update(TrajectoryEvent)
+                .where(TrajectoryEvent.student_id.in_(student_ids))
+                .values(created_by_user_id=None),
+            ),
+            (
+                "unlink authorized_persons.dni_verified_by_user",
+                update(AuthorizedPerson)
+                .where(AuthorizedPerson.student_id.in_(student_ids))
+                .values(dni_verified_by_user_id=None),
+            ),
+            (
+                "unlink student_invitation_tokens.user/admin",
+                update(StudentInvitationToken)
+                .where(StudentInvitationToken.student_id.in_(student_ids))
+                .values(user_id=None, created_by_admin_id=None),
+            ),
+            (
+                "unlink attendance.registered_by",
+                update(Attendance)
+                .where(Attendance.student_id.in_(student_ids))
+                .values(registered_by=None),
+            ),
+        ]
+    else:
+        _UNLINKS = []
+
+    for name, stmt in _UNLINKS:
+        result = db.execute(stmt)
+        counts[name] = int(getattr(result, "rowcount", 0) or 0)
+
+    # NOTA: payments.recorded_by es NOT NULL + FK users.id ON DELETE RESTRICT.
+    # No podemos nulificarlo, pero borramos payments ENTERAMENTE ANTES que los
+    # rows en users (ver orden _DELETES), así que la FK nunca se viola.
+
     _DELETES = [
         ("student_fight_records", delete(StudentFightRecord).where(StudentFightRecord.student_id.in_(student_ids)) if student_ids else None),
         ("trajectory_events", delete(TrajectoryEvent).where(TrajectoryEvent.student_id.in_(student_ids)) if student_ids else None),
@@ -243,9 +306,9 @@ def _purge_org_student_data(db: Session, org_ids: list[int], branch_ids: list[in
         ("attendance", delete(Attendance).where(Attendance.student_id.in_(student_ids)) if student_ids else None),
         ("payments", delete(Payment).where(Payment.organization_id.in_(org_ids))),
         ("class_enrollments", delete(ClassEnrollment).where(ClassEnrollment.student_id.in_(student_ids)) if student_ids else None),
+        ("students", delete(Student).where(Student.organization_id.in_(org_ids))),
         ("class_schedules", delete(ClassSchedule).where(ClassSchedule.class_id.in_(class_ids)) if class_ids else None),
         ("classes", delete(MartialClass).where(MartialClass.organization_id.in_(org_ids))),
-        ("students", delete(Student).where(Student.organization_id.in_(org_ids))),
     ]
 
     if user_ids:
