@@ -325,6 +325,14 @@ def _purge_org_student_data(db: Session, org_ids: list[int], branch_ids: list[in
 
 
 def _ensure_disciplines_and_belts(db: Session, org: Organization) -> dict[str, Discipline]:
+    """Asegura 3 disciplinas y, si la ORG NO TIENE NINGUN belt_level, crea
+    un catalogo inicial de 5 niveles (BJJ) con 4 stripes cada uno.
+
+    NOTA sobre UNIQUE(organization_id, name): NO se puede crear un "Blanca"
+    para BJJ y otro "Blanca" para JUDO en la misma ORG. Por eso, si ya
+    existen belt_levels en la org, SKIP de creacion (el catalogo ya
+    existia con convenciones de nombres desconocidas).
+    """
     disc_map: dict[str, Discipline] = {}
     for dname in ["MMA", "BJJ", "JUDO"]:
         d = db.scalar(
@@ -338,18 +346,10 @@ def _ensure_disciplines_and_belts(db: Session, org: Organization) -> dict[str, D
             db.flush()
         disc_map[dname] = d
 
-    for d_name, specs in BELT_CATALOG:
-        existing = db.scalar(
-            select(BeltLevel.id).where(
-                BeltLevel.organization_id == org.id,
-                BeltLevel.name == specs[0][0],
-            )
-        )
-        if existing is not None:
-            continue
-        disc = disc_map.get(d_name)
-        if disc is None:
-            continue
+    any_belt = db.scalar(select(BeltLevel.id).where(BeltLevel.organization_id == org.id))
+    if any_belt is None:
+        disc = disc_map.get("BJJ") or list(disc_map.values())[0]
+        specs = BELT_CATALOG[0][1]
         for idx, (name, color_hex, text_color_hex) in enumerate(specs, start=1):
             belt = BeltLevel(
                 organization_id=org.id,
@@ -445,7 +445,7 @@ def _create_one_student(
     classes: list[MartialClass],
     belt_white_id: int,
     belt_blue_id: int,
-    stripe_2_id: int,
+    stripe_2_id: int | None,
 ) -> tuple[User, Student]:
     random.seed(f"seed-{admin.id}-{org.id}-{index}-{date.today().isoformat()}")
 
@@ -781,14 +781,44 @@ def main() -> int:
             print(f"       Horarios   : {len(scheds)} sesiones/semana")
 
         belts_org: list[BeltLevel] = db.scalars(
-            select(BeltLevel).where(BeltLevel.organization_id == target_org.id).order_by(BeltLevel.order_index)
+            select(BeltLevel)
+            .where(BeltLevel.organization_id == target_org.id, BeltLevel.is_active.is_(True))
+            .order_by(BeltLevel.order_index, BeltLevel.id)
         ).all()
-        belts_by_name: dict[str, BeltLevel] = {b.name: b for b in belts_org}
-        belt_white = belts_by_name["Blanca"]
-        belt_blue = belts_by_name["Azul"]
-        stripe_2: BeltStripe = db.scalars(
-            select(BeltStripe).where(BeltStripe.belt_level_id == belt_blue.id, BeltStripe.order_index == 2)
+        if not belts_org:
+            print("[FATAL] La organizacion no tiene ningun BeltLevel activo.")
+            db.rollback()
+            return 5
+        if len(belts_org) == 1:
+            belt_white = belts_org[0]
+            belt_blue = belts_org[0]
+        else:
+            belt_white = belts_org[0]
+            belt_blue = belts_org[1]
+
+        stripe_2: BeltStripe | None = db.scalars(
+            select(BeltStripe).where(
+                BeltStripe.belt_level_id == belt_blue.id,
+                BeltStripe.is_active.is_(True),
+            ).order_by(BeltStripe.order_index)
         ).first()
+        if stripe_2 is None and len(belts_org) >= 1:
+            stripe_2 = db.scalars(
+                select(BeltStripe).where(
+                    BeltStripe.belt_level_id == belts_org[0].id,
+                    BeltStripe.is_active.is_(True),
+                ).order_by(BeltStripe.order_index)
+            ).first()
+
+        print(f"  Catalogo de cinturones disponibles: {len(belts_org)}")
+        for idx_b, b in enumerate(belts_org[:6]):
+            print(f"    #{idx_b + 1} order={b.order_index}  id={b.id}  name={b.name!r}  display={b.display_name}")
+        if len(belts_org) > 6:
+            print(f"    ... y {len(belts_org) - 6} más.")
+        print(f"  Cinta 'inicial' (para alumno 2): id={belt_white.id}  {belt_white.display_name}")
+        print(f"  Cinta 'avanzada'(para alumno 1): id={belt_blue.id}   {belt_blue.display_name}")
+        if stripe_2:
+            print(f"  Stripe asignado (punteo avanzado): id={stripe_2.id}  {stripe_2.display_name}")
 
         _banner("CREANDO 2 ALUMNOS CON CUENTA APROBADA Y DATOS COMPLETOS")
         created_students: list[tuple[User, Student]] = []
