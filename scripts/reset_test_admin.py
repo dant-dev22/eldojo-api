@@ -153,6 +153,32 @@ ADMIN_EMAIL = "dantedev22@gmail.com"
 APPLY = (os.getenv("APPLY") or "0").strip() in {"1", "true", "yes", "on"}
 STUDENT_PASSWORD_RAW = "DojoTest2026!"
 
+# VALORES LITERALES DE ENUM COINCIDIENDO EXACTAMENTE CON LOS DEFINIDOS EN EL ESQUEMA
+# MYSQL. Usamos strings hardcodeados (no Enum.value ni nada intermedio) para
+# evitar cualquier desviacion de SQLAlchemy por SQLEnum sin values_callable.
+ENUM_STR = {
+    "UserRole__STUDENT":             "student",
+    "UserRole__ORG_ADMIN":           "org_admin",
+    "PaymentStatus__UP_TO_DATE":     "up_to_date",
+    "PaymentStatus__DUE_SOON":       "due_soon",
+    "PaymentStatus__OVERDUE":        "overdue",
+    "StudentStatus__ACTIVE":         "active",
+    "StudentStatus__FROZEN":         "frozen",
+    "StudentStatus__INACTIVE":       "inactive",
+    "PaymentMethod__CASH":           "cash",
+    "PaymentMethod__TRANSFER":       "transfer",
+    "PaymentMethod__CARD":           "card",
+    "PaymentMethod__OTHER":          "other",
+    "PaymentRecordStatus__PAID":     "paid",
+    "PaymentRecordStatus__PENDING":  "pending",
+    "PaymentRecordStatus__VOID":     "void",
+    "AttendanceMethod__QR":          "qr",
+    "AttendanceMethod__MANUAL":      "manual",
+    "FightRecordType__VICTORY":      "victoria",
+    "FightRecordType__DRAW":         "empate",
+    "FightRecordType__LOSS":         "derrota",
+}
+
 BELT_CATALOG: list[tuple[str, list[tuple[str, str, str]]]] = [
     ("BJJ", [
         ("Blanca",  "#FFFFFF", "#111111"),
@@ -193,6 +219,72 @@ def _random_phone() -> str:
 
 def _random_dni() -> str:
     return "".join(random.choices(string.digits, k=10))
+
+
+def _validate_mysql_enums(db: Session) -> None:
+    """Pre-check: lee SHOW COLUMNS para las tablas con ENUM y verifica que
+    los literales que vamos a escribir (ENUM_STR) coinciden con los valores
+    reales del ENUM de MySQL. Si hay desviación, falla con mensaje claro
+    (evita el error Data truncated 1265 en medio del INSERT).
+
+    Solo se ejecuta cuando el dialecto es mysql/mariadb; en SQLite se salta.
+    """
+    import re
+
+    from sqlalchemy import text as _sa_text
+
+    engine = db.get_bind()
+    dialect_name = getattr(getattr(engine, "dialect", None), "name", "?")
+    if dialect_name not in ("mysql", "mariadb", "pymysql", "aiomysql", "mysqlconnector", "mysqldb"):
+        return
+
+    enum_checks = [
+        ("student_fight_records", "record_type",   [
+            ENUM_STR["FightRecordType__VICTORY"],
+            ENUM_STR["FightRecordType__DRAW"],
+            ENUM_STR["FightRecordType__LOSS"],
+        ]),
+        ("users",     "role",           [ENUM_STR["UserRole__STUDENT"]]),
+        ("students",  "status",         [ENUM_STR["StudentStatus__ACTIVE"]]),
+        ("students",  "payment_status", [ENUM_STR["PaymentStatus__UP_TO_DATE"]]),
+        ("payments",  "method",         [ENUM_STR["PaymentMethod__TRANSFER"]]),
+        ("payments",  "status",         [ENUM_STR["PaymentRecordStatus__PAID"]]),
+        ("attendance","method",         [ENUM_STR["AttendanceMethod__QR"]]),
+    ]
+
+    print("  Pre-check ENUMs en MySQL (SHOW COLUMNS)...")
+    problems: list[str] = []
+    for table, col, required_vals in enum_checks:
+        row = db.execute(_sa_text(f"SHOW COLUMNS FROM `{table}` LIKE :col"), {"col": col}).fetchone()
+        if row is None:
+            continue
+        if isinstance(row, dict):
+            type_str = str(row.get("Type") or "")
+        else:
+            type_str = str(row[1]) if len(row) > 1 else ""
+        vset: list[str] = []
+        m = re.match(r"^enum\((.*)\)$", type_str, re.IGNORECASE)
+        if m:
+            vset = re.findall(r"'((?:''|[^'])*)'", m.group(1))
+            vset = [v.replace("''", "'") for v in vset]
+        if not vset:
+            continue
+        missing = [v for v in required_vals if v not in vset]
+        if missing:
+            problems.append(
+                f"  ⚠️  {table}.{col}: valores ENUM reales={vset} — FALTAN={missing}"
+            )
+        else:
+            print(f"    ✅ {table}.{col:<15s} contiene {required_vals}")
+
+    if problems:
+        print()
+        for p in problems:
+            print(p)
+        print("\n[ERROR] Los ENUMs del esquema MySQL NO coinciden con los literales del script.")
+        print("        Esto evitara el error 'Data truncated for column ...' (MySQL 1265).")
+        raise SystemExit(6)
+    print()
 
 
 def _fetch_admin_ctx(db: Session) -> tuple[Optional[User], list[Organization], list[Branch]]:
@@ -312,7 +404,7 @@ def _purge_org_student_data(db: Session, org_ids: list[int], branch_ids: list[in
     ]
 
     if user_ids:
-        _DELETES.append(("users", delete(User).where(User.id.in_(user_ids), User.role == UserRole.STUDENT.value)))
+        _DELETES.append(("users", delete(User).where(User.id.in_(user_ids), User.role == ENUM_STR["UserRole__STUDENT"])))
 
     for name, stmt in _DELETES:
         if stmt is None:
@@ -465,7 +557,7 @@ def _create_one_student(
         last_name=last_name.split(" ")[0],
         email=email,
         password_hash=hash_password(STUDENT_PASSWORD_RAW),
-        role=UserRole.STUDENT.value,
+        role=ENUM_STR["UserRole__STUDENT"],
         is_active=True,
         email_verified_at=datetime.utcnow(),
         first_time=False,
@@ -490,8 +582,8 @@ def _create_one_student(
         monthly_fee=Decimal("1500.00"),
         currency="MXN",
         next_payment_date=next_pay_dt,
-        payment_status=PaymentStatus.UP_TO_DATE.value,
-        status=StudentStatus.ACTIVE.value,
+        payment_status=ENUM_STR["PaymentStatus__UP_TO_DATE"],
+        status=ENUM_STR["StudentStatus__ACTIVE"],
         current_belt_level_id=belt_blue_id if index == 0 else belt_white_id,
         current_stripe_id=stripe_2_id if index == 0 else None,
         guardian_name="Maria de los Angeles Ruiz" if is_minor else None,
@@ -530,8 +622,8 @@ def _create_one_student(
                 period_start=period_start,
                 period_end=period_end,
                 paid_at=datetime.combine(period_start, time(9, 30)) + timedelta(days=2),
-                method=PaymentMethod.TRANSFER.value,
-                status=PaymentRecordStatus.PAID.value,
+                method=ENUM_STR["PaymentMethod__TRANSFER"],
+                status=ENUM_STR["PaymentRecordStatus__PAID"],
                 recorded_by=admin.id,
                 notes="Pago mensual - Colegiatura regular",
             )
@@ -545,7 +637,7 @@ def _create_one_student(
                 class_id=at_class.id,
                 branch_id=branch.id,
                 check_in_at=datetime.now() - timedelta(days=day_off, hours=2),
-                method=AttendanceMethod.QR.value,
+                method=ENUM_STR["AttendanceMethod__QR"],
                 registered_by=admin.id,
             )
         )
@@ -654,9 +746,9 @@ def _create_one_student(
         )
 
     fight_data = [
-        (FightRecordType.VICTORY.value, "Rival Prueba A", enroll_dt + timedelta(days=45)),
-        (FightRecordType.DRAW.value,    "Rival Prueba B", enroll_dt + timedelta(days=75)),
-        (FightRecordType.LOSS.value,    "Rival Prueba C", enroll_dt + timedelta(days=95)),
+        (ENUM_STR["FightRecordType__VICTORY"], "Rival Prueba A", enroll_dt + timedelta(days=45)),
+        (ENUM_STR["FightRecordType__DRAW"],    "Rival Prueba B", enroll_dt + timedelta(days=75)),
+        (ENUM_STR["FightRecordType__LOSS"],    "Rival Prueba C", enroll_dt + timedelta(days=95)),
     ]
     for rtype, opp, fdate in fight_data:
         db.add(
@@ -714,6 +806,10 @@ def main() -> int:
             print(f"[FATAL] No se pudo hacer SELECT 1 contra la BD. Revisa DATABASE_URL.")
             print(f"       Detalle : {type(exc).__name__}: {exc}")
             return 4
+
+        # Pre-check ENUMs MySQL: SI HAY DESVIACIÓN SE SALE AQUÍ,
+        # NO HASTA MEDIO INSERT (evita MySQL 1265 Data truncated).
+        _validate_mysql_enums(db)
 
         admin, orgs, branches = _fetch_admin_ctx(db)
         if admin is None:
