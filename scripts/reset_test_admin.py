@@ -1,13 +1,46 @@
-"""Script one-off: Reinicia el usuario admin de prueba (dantedev22@gmail.com)
-en PROD eliminando alumnos/clases existentes de sus organizaciones y creando
-2 alumnos nuevos con cuenta APROBADA, datos completos y 2 clases para pruebas.
+r"""Script one-off: Reinicia el usuario admin de prueba (dantedev22@gmail.com)
+en PROD (MySQL) eliminando alumnos/clases existentes de sus organizaciones y
+creando 2 alumnos nuevos con cuenta APROBADA, datos completos y 2 clases.
 
-Uso:
-  # Dry-run - solo muestra que se haria:
-  python scripts/reset_test_admin.py
+BASE DE DATOS  : Compatible 100% con MySQL (usa los mismos models/enums/engine
+                 del backend a traves de SessionLocal).
 
-  # Aplicar cambios:
-  APPLY=1 python scripts/reset_test_admin.py
+IMPORTANTE     : Usa SIEMPRE el Python del VIRTUALENV del proyecto, NO el
+                 python3 del sistema operativo, ya que las dependencias
+                 (sqlalchemy, pymysql, etc.) solo estan instaladas ahi.
+
+========================================================================
+  COMO EJECUTARLO EN UN VPS / LINUX (PROD)
+========================================================================
+
+  # 1) Entra al folder raiz del backend:
+  cd /eldojo/eldojo-api
+     (o donde este clonado el proyecto - adaptar el path)
+
+  # 2) Identifica el virtualenv del proyecto. Suele ser uno de:
+  ls -la | grep -E "(venv|\.venv)"
+     Si NO existe, crearlo:  python3 -m venv .venv && . .venv/bin/activate && pip install -r requirements.txt
+
+  # 3) DRY-RUN (RECOMENDADO SIEMPRE primero - NO toca NADA en BD):
+  .venv/bin/python scripts/reset_test_admin.py
+        (o si el venv se llama "venv" sin punto:  venv/bin/python ...)
+
+     Si en vez de eso te da un menu elegible, prueba a ACTIVARLO antes:
+       source .venv/bin/activate
+       python scripts/reset_test_admin.py
+
+  # 4) APLICAR CAMBIOS (COMMIT real sobre MySQL):
+  APPLY=1 .venv/bin/python scripts/reset_test_admin.py
+
+========================================================================
+  NOTAS SOBRE MYSQL
+========================================================================
+  - El script NO usa SQLite ni features Postgres. Todo via SQLAlchemy +
+    SessionLocal (que en prod apunta a MySQL via DATABASE_URL).
+  - Los DELETEs se ejecutan respetando orden de FKs para evitar errores
+    1451 "Cannot delete or update a parent row".
+  - Todos los ENUMs se persisten usando SqlEnum (los mismos que el backend).
+  - rowcount se usa solo para informar; el COMMIT/ROLLBACK es atomico.
 """
 
 from __future__ import annotations
@@ -25,6 +58,61 @@ from typing import Optional
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
+
+
+def _bootstrap_or_die() -> None:
+    """Valida que se este ejecutando con el interprete correcto.
+
+    Si sqlalchemy no se puede importar, probablemente el usuario invoco
+    `python3 scripts/...` del sistema y no el del virtualenv. En ese
+    caso mostramos un mensaje de error UTIL y salimos sin traceback.
+    """
+
+    project_root = Path(__file__).resolve().parent.parent
+    candidate_pythons: list[Path] = []
+    for venv_name in (".venv", "venv"):
+        if (project_root / venv_name / "bin" / "python").exists():
+            candidate_pythons.append(project_root / venv_name / "bin" / "python")
+        if (project_root / venv_name / "Scripts" / "python.exe").exists():
+            candidate_pythons.append(project_root / venv_name / "Scripts" / "python.exe")
+
+    try:
+        import sqlalchemy  # noqa: F401
+    except Exception as exc:
+        sys.stderr.write("=" * 72 + "\n")
+        sys.stderr.write("[ERROR DE ENTORNO] No se pudo importar 'sqlalchemy'.\n")
+        sys.stderr.write("=" * 72 + "\n")
+        sys.stderr.write(f"  Python que estas usando : {sys.executable}\n")
+        sys.stderr.write(f"  Proyecto raiz          : {project_root}\n")
+        sys.stderr.write(f"  Detalle importacion    : {type(exc).__name__}: {exc}\n\n")
+        sys.stderr.write("  >>> ESTAS USANDO EL PYTHON DEL SISTEMA, NO EL DEL VIRTUALENV <<<\n\n")
+        if candidate_pythons:
+            sys.stderr.write("  Solucion (VPS/Linux - DRY-RUN primero):\n")
+            for p in candidate_pythons:
+                sys.stderr.write(f"    {p} scripts/reset_test_admin.py\n")
+            sys.stderr.write("\n  Para APLICAR cambios:\n")
+            for p in candidate_pythons:
+                sys.stderr.write(f"    APPLY=1 {p} scripts/reset_test_admin.py\n")
+        else:
+            sys.stderr.write("  No encontre ningun virtualenv en el proyecto.\n")
+            sys.stderr.write("  Crealo e instala las dependencias:\n")
+            sys.stderr.write(f"    cd {project_root}\n")
+            sys.stderr.write("    python3 -m venv .venv\n")
+            sys.stderr.write("    source .venv/bin/activate\n")
+            sys.stderr.write("    pip install -r requirements.txt\n\n")
+            sys.stderr.write("  Luego re-ejecuta el script.\n")
+        sys.stderr.write("\n")
+        raise SystemExit(3)
+
+    try:
+        import pymysql  # noqa: F401
+    except Exception:
+        # pymysql es opcional en local (SQLite) pero avisa en prod si falta
+        pass
+
+
+_bootstrap_or_die()
+
 
 from sqlalchemy import delete, select  # noqa: E402
 from sqlalchemy.orm import Session  # noqa: E402
@@ -541,6 +629,29 @@ def main() -> int:
     print()
 
     with SessionLocal() as db:
+        try:
+            from sqlalchemy import text as _sa_text
+            diag = db.execute(_sa_text("SELECT 1")).scalar()
+            engine = db.get_bind()
+            dialect_name = getattr(engine, "dialect", None)
+            dialect_name = getattr(dialect_name, "name", "?") if dialect_name else "?"
+            db_url_censored = (
+                str(engine.url).replace(":" + str(engine.url.password or "") + "@", ":***@")
+                if getattr(engine, "url", None) is not None else "?"
+            )
+            print(f"  DB Dialecto   :  {dialect_name}  (SELECT 1 = {diag})")
+            print(f"  DB URL        :  {db_url_censored}")
+            if dialect_name not in ("mysql", "mariadb", "pymysql", "aiomysql", "mysqlconnector", "mysqldb"):
+                print(f"\n  ⚠️  ADVERTENCIA: El dialecto detectado es {dialect_name!r},"
+                      f" no se parece a MySQL.\n"
+                      f"     Si estas en PROD y la conexion NO apunta a MySQL,"
+                      f" CANCELA con Ctrl+C ahora mismo.")
+            print()
+        except Exception as exc:
+            print(f"[FATAL] No se pudo hacer SELECT 1 contra la BD. Revisa DATABASE_URL.")
+            print(f"       Detalle : {type(exc).__name__}: {exc}")
+            return 4
+
         admin, orgs, branches = _fetch_admin_ctx(db)
         if admin is None:
             print(f"[FATAL] No existe usuario admin con email={ADMIN_EMAIL!r}")
