@@ -50,7 +50,7 @@ import random
 import secrets
 import string
 import sys
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import Optional
@@ -559,9 +559,9 @@ def _create_one_student(
         password_hash=hash_password(STUDENT_PASSWORD_RAW),
         role=ENUM_STR["UserRole__STUDENT"],
         is_active=True,
-        email_verified_at=datetime.utcnow(),
+        email_verified_at=datetime.now(tz=timezone.utc).replace(tzinfo=None),
         first_time=False,
-        last_login_at=datetime.utcnow() - timedelta(days=index + 1),
+        last_login_at=(datetime.now(tz=timezone.utc) - timedelta(days=index + 1)).replace(tzinfo=None),
     )
     db.add(user)
     db.flush()
@@ -750,14 +750,20 @@ def _create_one_student(
         (ENUM_STR["FightRecordType__DRAW"],    "Rival Prueba B", enroll_dt + timedelta(days=75)),
         (ENUM_STR["FightRecordType__LOSS"],    "Rival Prueba C", enroll_dt + timedelta(days=95)),
     ]
+    from sqlalchemy import text as _sa_text
+
     for rtype, opp, fdate in fight_data:
-        db.add(
-            StudentFightRecord(
-                student_id=student.id,
-                record_type=rtype,
-                opponent_name=opp,
-                fight_date=fdate,
-            )
+        db.execute(
+            _sa_text(
+                """
+                INSERT INTO student_fight_records
+                    (student_id, record_type, opponent_name, fight_date, deleted_at,
+                     created_at, updated_at)
+                VALUES
+                    (:sid, :rtype, :opp, :fdate, NULL, NOW(), NOW())
+                """
+            ),
+            {"sid": student.id, "rtype": rtype, "opp": opp, "fdate": fdate},
         )
 
     db.flush()
