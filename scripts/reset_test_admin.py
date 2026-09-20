@@ -891,12 +891,19 @@ def main() -> int:
             print("[FATAL] La organizacion no tiene ningun BeltLevel activo.")
             db.rollback()
             return 5
-        if len(belts_org) == 1:
-            belt_white = belts_org[0]
-            belt_blue = belts_org[0]
+
+        # Filtrar cintas infantiles si hay cintas adulto disponibles — las pruebas
+        # son con alumnos adultos (1 alumna de 26, 1 menor). Asi belt_white no
+        # termina siendo 'Blanca (Infantil)' cuando existe 'Blanca' adulto.
+        belts_adult = [b for b in belts_org if "infantil" not in (b.name or "").lower()]
+        belts_select = belts_adult or belts_org
+
+        if len(belts_select) == 1:
+            belt_white = belts_select[0]
+            belt_blue  = belts_select[0]
         else:
-            belt_white = belts_org[0]
-            belt_blue = belts_org[1]
+            belt_white = belts_select[0]
+            belt_blue  = belts_select[1]
 
         stripe_2: BeltStripe | None = db.scalars(
             select(BeltStripe).where(
@@ -904,19 +911,20 @@ def main() -> int:
                 BeltStripe.is_active.is_(True),
             ).order_by(BeltStripe.order_index)
         ).first()
-        if stripe_2 is None and len(belts_org) >= 1:
+        if stripe_2 is None:
             stripe_2 = db.scalars(
                 select(BeltStripe).where(
-                    BeltStripe.belt_level_id == belts_org[0].id,
+                    BeltStripe.belt_level_id == belt_white.id,
                     BeltStripe.is_active.is_(True),
                 ).order_by(BeltStripe.order_index)
             ).first()
 
-        print(f"  Catalogo de cinturones disponibles: {len(belts_org)}")
-        for idx_b, b in enumerate(belts_org[:6]):
+        print(f"  Catalogo de cinturones disponibles: {len(belts_org)} "
+              f"({len(belts_select)} despues de filtrar infantil)")
+        for idx_b, b in enumerate(belts_select[:6]):
             print(f"    #{idx_b + 1} order={b.order_index}  id={b.id}  name={b.name!r}  display={b.display_name}")
-        if len(belts_org) > 6:
-            print(f"    ... y {len(belts_org) - 6} más.")
+        if len(belts_select) > 6:
+            print(f"    ... y {len(belts_select) - 6} más.")
         print(f"  Cinta 'inicial' (para alumno 2): id={belt_white.id}  {belt_white.display_name}")
         print(f"  Cinta 'avanzada'(para alumno 1): id={belt_blue.id}   {belt_blue.display_name}")
         if stripe_2:
@@ -948,7 +956,7 @@ def main() -> int:
             print(f"      Cinta actual: {belt_cur.display_name if belt_cur else '-'}")
             print(f"      Fecha nac.  : {s.birth_date.isoformat()}  (menor={s.is_minor})")
             print(f"      Mensualidad : ${s.monthly_fee} {s.currency}  |  Prox. pago: {s.next_payment_date}")
-            print(f"      Estado pago : {s.payment_status.value}  |  Status alumno: {s.status.value}")
+            print(f"      Estado pago : {s.payment_status}  |  Status alumno: {s.status}")
             print(f"      Clase prim. : {next((c.name for c in new_classes if c.id == s.primary_class_id), '-')}")
             print(f"      Record RD   : {s.rd_victorias}V / {s.rd_empates}E / {s.rd_derrotas}D")
             print()
