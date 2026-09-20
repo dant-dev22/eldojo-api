@@ -33,6 +33,7 @@ from app.models.enums import StudentStatus, UserRole
 from app.models.organization import Branch, Organization
 from app.models.student import Student
 from app.models.student_invitation import StudentInvitationToken
+from app.models.student_password_reset import StudentPasswordResetToken
 from app.models.teaching import MartialClass
 from app.models.user import User
 from app.schemas.attendance import StudentAttendanceSummary
@@ -52,6 +53,43 @@ def _utc_now() -> datetime:
     """Helper para UTC naive coherente con la base actual."""
 
     return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+PLACEHOLDER_EMAIL_DOMAIN: str = "@pendiente.eldojo.tech"
+
+
+def _is_placeholder_email(email: str | None) -> bool:
+    """Devuelve True si el email es el placeholder temporal del alumno."""
+
+    if not email:
+        return True
+    return email.strip().lower().endswith(PLACEHOLDER_EMAIL_DOMAIN)
+
+
+def _resolve_student_assigned_email(
+    db: Session,
+    student: Student,
+    *,
+    prefer_user_email: bool = True,
+) -> str | None:
+    """Resuelve el email REAL asignado al alumno (no placeholder).
+
+    Orden de prioridad:
+      1) student.email (lo que el admin cargó en la ficha)
+      2) user.email si NO es placeholder (lo que quedó en la tabla users)
+    """
+
+    candidate: str | None = getattr(student, "email", None)
+    if candidate and candidate.strip() and not _is_placeholder_email(candidate):
+        return candidate.strip().lower()
+
+    if prefer_user_email and student.user_id is not None:
+        user = db.get(User, student.user_id)
+        if user is not None:
+            candidate = getattr(user, "email", None)
+            if candidate and candidate.strip() and not _is_placeholder_email(candidate):
+                return candidate.strip().lower()
+    return None
 
 
 router = APIRouter(prefix="/students", tags=["students"])
@@ -966,6 +1004,185 @@ def revoke_student_portal_access(
     result = refreshed or student
     attach_completeness(result)
     attach_portal_access(db, result)
+    return result
+
+
+def invalidate_student_password_reset_tokens(
+    db: Session,
+    *,
+    student_id: int | None = None,
+    user_id: int | None = None,
+    used_at: datetime | None = None,
+) -> int:
+    """Marca como usados TODOS los tokens de reset de password pendientes.
+
+    Garantiza que solo exista 1 token válido por alumno a la vez.
+    Devuelve la cantidad de tokens invalidados.
+    """
+
+    if student_id is None and user_id is None:
+        raise ValueError("Se requiere student_id o user_id para invalidar reset tokens")
+
+    predicates = [StudentPasswordResetToken.used_at.is_(None)]
+    if student_id is not None:
+        predicates.append(StudentPasswordResetToken.student_id == student_id)
+    if user_id is not None:
+        predicates.append(StudentPasswordResetToken.user_id == user_id)
+
+    timestamp = used_at or _utc_now()
+    pending = db.scalars(
+        select(StudentPasswordResetToken).where(and_(*predicates))
+    ).all()
+
+    for token in pending:
+        token.used_at = timestamp
+    return len(pending)
+
+
+@router.post("/{student_id}/generate-password-reset-link", response_model=StudentRead)
+def generate_student_password_reset_link(
+    student_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_active_user),
+) -> Student:
+    """Genera un link público para que el alumno cambie su contraseña.
+
+    Flujo semántico NUEVO (ticket 3):
+      1) El alumno queda "aprobado en el portal" automáticamente:
+         - User is_active = True
+         - User email_verified_at = NOW()
+      2) El único pendiente es cambiar la contraseña:
+         - User must_change_password = True
+         - Se envía un link tokenizado de 48h
+
+    Reglas de seguridad:
+      - El alumno debe tener un email REAL (no @pendiente.eldojo.tech) en su
+        ficha. Si no: 422.
+      - Garantiza "solo un token pendiente por alumno": se invalidan todos
+        los reset tokens hermanos antes de generar uno nuevo.
+      - Fail-open en SMTP: el token se guarda incluso si el correo no llega.
+        El admin puede volver a copiar el link desde la UI.
+    """
+
+    student = get_student_or_404(db, student_id)
+    ensure_can_access_operational_scope(
+        current_user,
+        organization_id=student.organization_id,
+        branch_id=student.branch_id,
+    )
+
+    # === 1) Validar que el alumno tenga un email REAL asignado ===
+    real_email = _resolve_student_assigned_email(db, student, prefer_user_email=True)
+    if not real_email or _is_placeholder_email(real_email):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                "El alumno no tiene un correo electrónico válido asignado. "
+                "Por favor completa el campo email de la ficha antes de generar el link."
+            ),
+        )
+
+    # === 2) Colisión de email: verificar que nadie más tenga este email ===
+    from app.api.routes.auth import get_user_by_email
+
+    collision_user = get_user_by_email(db, real_email)
+    if collision_user is not None:
+        expected_student_user_id: int | None = None
+        if student.user_id is not None:
+            expected_student_user_id = int(student.user_id)
+        if int(collision_user.id) != int(expected_student_user_id or 0):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"El correo {real_email} ya está en uso por otra cuenta.",
+            )
+
+    now = _utc_now()
+
+    # === 3) Asegurar portal_user y marcar como APROBADO ===
+    portal_user = _ensure_student_has_portal_user(
+        db,
+        student,
+        student_email=real_email,
+    )
+    if not portal_user.is_active:
+        portal_user.is_active = True
+
+    portal_user.must_change_password = True
+    portal_user.email_verified_at = now or portal_user.email_verified_at
+    if _is_placeholder_email(portal_user.email):
+        portal_user.email = real_email
+
+    # === 4) Invalidar reset tokens hermanos pendientes para mantener unicidad ===
+    invalidate_student_password_reset_tokens(
+        db,
+        student_id=student.id,
+        user_id=portal_user.id,
+        used_at=now,
+    )
+
+    # === 5) Generar token HMAC determinístico (mismo TTL 48h que invitaciones) ===
+    reset_created_at = now
+    reset_nonce = generate_student_invitation_nonce()
+    raw_token, token_hash, _token_tail = generate_deterministic_student_invitation_token(
+        student_id=student.id,
+        nonce=reset_nonce,
+        created_at=reset_created_at,
+    )
+
+    db.add(
+        StudentPasswordResetToken(
+            student_id=student.id,
+            user_id=portal_user.id,
+            token_hash=token_hash,
+            token_nonce=reset_nonce,
+            expires_at=student_invitation_expires_at(),
+            used_at=None,
+            created_by_admin_id=current_user.id,
+            email_sent_to=real_email,
+            created_at=reset_created_at,
+        )
+    )
+    db.commit()
+
+    # ===== Enviar correo con link de reseteo (fail-open) =====
+    organization = db.get(Organization, student.organization_id)
+    dojo_name = getattr(organization, "name", None) if organization else None
+    recipient_name = (
+        f"{student.first_name} {student.last_name}".strip()
+        if student.first_name or student.last_name
+        else None
+    )
+    invitation_link = build_student_invitation_link(raw_token)
+    ttl_hours = 48
+    mail_ok = send_student_invitation_link_email(
+        recipient_email=real_email,
+        recipient_name=recipient_name,
+        dojo_name=dojo_name,
+        invitation_link=invitation_link,
+        expires_hours=ttl_hours,
+    )
+    if mail_ok:
+        latest_reset = db.scalar(
+            select(StudentPasswordResetToken)
+            .where(StudentPasswordResetToken.student_id == student.id)
+            .order_by(
+                StudentPasswordResetToken.created_at.desc(),
+                StudentPasswordResetToken.id.desc(),
+            )
+            .limit(1)
+        )
+        if latest_reset is not None and latest_reset.email_sent_to != real_email:
+            latest_reset.email_sent_to = real_email
+        db.commit()
+
+    refreshed = db.scalar(
+        select(Student)
+        .where(Student.id == student.id)
+        .options(*_student_load_options(include_details=True))
+    )
+    result = refreshed or student
+    attach_completeness(result)
+    attach_portal_access(db, result, latest_raw_token=raw_token)
     return result
 
 

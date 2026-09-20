@@ -25,6 +25,7 @@ class User(Base):
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("1"))
     email_verified_at: Mapped[datetime | None] = mapped_column(DateTime(), nullable=True)
     first_time: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("1"))
+    must_change_password: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("0"))
     last_login_at: Mapped[datetime | None] = mapped_column(DateTime(), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(),
