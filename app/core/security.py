@@ -58,12 +58,6 @@ def generate_email_verification_token() -> str:
     return secrets.token_urlsafe(32)
 
 
-def generate_session_sync_token() -> str:
-    """Genera un ticket URL-safe para sincronizar sesión entre subdominios."""
-
-    return secrets.token_urlsafe(32)
-
-
 def hash_email_verification_token(raw_token: str) -> str:
     """Hashea un token de verificación/ticket para guardarlo en BD."""
 

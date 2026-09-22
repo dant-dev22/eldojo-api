@@ -137,19 +137,6 @@ class TokenResponse(BaseModel):
     user: UserRead
 
 
-class SessionTicketCreateResponse(BaseModel):
-    """Respuesta al crear un ticket de sincronización entre subdominios."""
-
-    ticket: str
-    ttl_seconds: int
-
-
-class SessionTicketRedeemRequest(BaseModel):
-    """Payload para canjear un ticket de sincronización y obtener tokens."""
-
-    ticket: str = Field(min_length=16, max_length=512)
-
-
 class StudentInvitationPreviewResponse(BaseModel):
     """Estado público de una invitación de alumno (antes de canjear)."""
 
