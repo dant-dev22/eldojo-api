@@ -17,6 +17,8 @@ from app.core.mail import (
     MailDeliveryError,
     build_academy_confirmation_url,
     send_academy_confirmation_email,
+    send_admin_student_account_activated_notification,
+    send_student_account_activated_email,
     send_student_verification_code_email,
 )
 from app.core.security import (
@@ -35,6 +37,10 @@ from app.core.student_invitation import (
     invalidate_student_invitations,
     invalidate_verification_code_for_invitation,
     issue_verification_code_for_invitation,
+    student_invitation_expires_at,
+    generate_student_invitation_nonce,
+    generate_deterministic_student_invitation_token,
+    hash_email_verification_token as _si_hash_email_verification_token,
 )
 from app.db.session import get_db
 from app.models.academy_pending_session import AcademyPendingSession
@@ -44,6 +50,7 @@ from app.models.enums import UserRole
 from app.models.session_sync_ticket import SessionSyncTicket
 from app.models.student import Student
 from app.models.student_invitation import StudentInvitationToken
+from app.models.student_password_reset import StudentPasswordResetToken
 from app.models.user import AdminAssignment, User
 from app.schemas.auth import (
     AcademyConfirmRequest,
@@ -60,6 +67,9 @@ from app.schemas.auth import (
     StudentInvitationRedeemRequest,
     StudentInvitationVerifyCodeRequest,
     StudentInvitationVerifyCodeResponse,
+    StudentPasswordResetPreviewResponse,
+    StudentPasswordResetConfirmRequest,
+    StudentPasswordResetConfirmResponse,
     StudentRegisterRequest,
     TokenResponse,
     TutorialStateUpdateRequest,
@@ -1267,6 +1277,266 @@ def redeem_student_invitation(
         db.rollback()
         raise build_duplicate_error(exc, "No fue posible activar tu cuenta") from exc
 
+    # === Enviar correos post-activación (fail-open) ===
+    organization = db.get(Organization, student.organization_id)
+    dojo_name = getattr(organization, "name", None) if organization else None
+    recipient_name = None
+    if user.first_name or user.last_name:
+        candidate = f"{user.first_name or ''} {user.last_name or ''}".strip()
+        recipient_name = candidate or None
+    if final_email:
+        send_student_account_activated_email(
+            recipient_email=final_email,
+            recipient_name=recipient_name,
+            dojo_name=dojo_name,
+        )
+        # Notificar admins de la organización
+        if organization is not None:
+            admin_rows = db.scalars(
+                select(User)
+                .join(AdminAssignment, AdminAssignment.user_id == User.id)
+                .where(AdminAssignment.organization_id == organization.id)
+                .where(User.role == UserRole.ORG_ADMIN)
+                .where(User.is_active.is_(True))
+            ).all()
+            for admin_user in admin_rows:
+                if admin_user and getattr(admin_user, "email", None):
+                    send_admin_student_account_activated_notification(
+                        recipient_email=admin_user.email,
+                        dojo_name=dojo_name,
+                        student_email=final_email,
+                        student_name=recipient_name,
+                    )
+
     db.refresh(user)
     return build_token_response(user)
+
+
+# ======================== Student Password Reset (público) ========================
+
+
+def _find_password_reset_token_by_raw(
+    db: Session, raw_token: str
+) -> StudentPasswordResetToken | None:
+    """Busca un reset token por hash sin validar vigencia (para distinguir estados)."""
+
+    if not raw_token:
+        return None
+    token_hash = _si_hash_email_verification_token(raw_token)
+    return db.scalar(
+        select(StudentPasswordResetToken).where(
+            StudentPasswordResetToken.token_hash == token_hash
+        )
+    )
+
+
+def _invalidate_password_reset_tokens(
+    db: Session,
+    *,
+    student_id: int | None = None,
+    user_id: int | None = None,
+    used_at: datetime | None = None,
+) -> int:
+    """Marca como usados TODOS los reset tokens pendientes de un alumno/usuario."""
+
+    if student_id is None and user_id is None:
+        raise ValueError("Se requiere student_id o user_id para invalidar reset tokens")
+
+    from sqlalchemy import and_ as _and
+
+    predicates = [StudentPasswordResetToken.used_at.is_(None)]
+    if student_id is not None:
+        predicates.append(StudentPasswordResetToken.student_id == student_id)
+    if user_id is not None:
+        predicates.append(StudentPasswordResetToken.user_id == user_id)
+
+    timestamp = used_at or utc_now()
+    pending = db.scalars(
+        select(StudentPasswordResetToken).where(_and(*predicates))
+    ).all()
+
+    for token in pending:
+        token.used_at = timestamp
+    return len(pending)
+
+
+@router.get("/student-password-reset", response_model=StudentPasswordResetPreviewResponse)
+def preview_student_password_reset(
+    token: str = Query(..., min_length=16, max_length=512),
+    db: Session = Depends(get_db),
+) -> StudentPasswordResetPreviewResponse:
+    """Vista pública del estado de un token de reseteo de contraseña.
+
+    Devuelve `status` ∈ {valid, invalid, used, expired} junto con datos
+    amigables para renderizar la pantalla (foto perfil, nombre, email, dojo).
+    """
+
+    reset_token = _find_password_reset_token_by_raw(db, token)
+    now = utc_now()
+
+    if reset_token is None:
+        return StudentPasswordResetPreviewResponse(
+            status="invalid",
+            message="El enlace para cambiar la contraseña no es válido.",
+        )
+
+    if reset_token.used_at is not None:
+        return StudentPasswordResetPreviewResponse(
+            status="used",
+            message="Este enlace ya fue utilizado. Solicita uno nuevo a tu dojo.",
+        )
+
+    if reset_token.expires_at is not None and reset_token.expires_at <= now:
+        return StudentPasswordResetPreviewResponse(
+            status="expired",
+            message="Este enlace ha expirado. Solicita uno nuevo a tu dojo.",
+        )
+
+    student = db.get(Student, reset_token.student_id)
+    organization = db.get(Organization, student.organization_id) if student else None
+    dojo_name = getattr(organization, "name", None) if organization else None
+
+    suggested_email: str | None = None
+    if getattr(reset_token, "email_sent_to", None):
+        suggested_email = reset_token.email_sent_to
+    elif student and getattr(student, "email", None):
+        candidate = student.email
+        if not _is_placeholder_email(candidate):
+            suggested_email = candidate
+    elif reset_token.user_id:
+        user = db.get(User, reset_token.user_id)
+        if user and not _is_placeholder_email(user.email):
+            suggested_email = user.email
+
+    photo_raw = getattr(student, "photo_url", None)
+    photo_url_str: str | None = None
+    if photo_raw is not None:
+        photo_url_str = str(photo_raw) if photo_raw else None
+
+    return StudentPasswordResetPreviewResponse(
+        status="valid",
+        message="Establece una contraseña segura para activar tu cuenta.",
+        first_name=getattr(student, "first_name", None),
+        last_name=getattr(student, "last_name", None),
+        photo_url=photo_url_str,
+        suggested_email=suggested_email,
+        dojo_name=dojo_name,
+        expires_at=reset_token.expires_at,
+    )
+
+
+@router.post(
+    "/student-password-reset/confirm",
+    response_model=StudentPasswordResetConfirmResponse,
+)
+def confirm_student_password_reset(
+    payload: StudentPasswordResetConfirmRequest,
+    db: Session = Depends(get_db),
+) -> StudentPasswordResetConfirmResponse:
+    """Cambia la contraseña del alumno y marca su cuenta como activada.
+
+    IMPORTANTE: Este endpoint NO devuelve tokens de sesión (no auto-login).
+    El alumno debe iniciar sesión manualmente desde eldojo.tech.
+
+    Acciones:
+      - Actualiza `password_hash` del User.
+      - Setea `must_change_password=FALSE`.
+      - Marca el token usado + invalida hermanos.
+      - Devuelve {status: ok, user_email, message}.
+    """
+
+    reset_token = _find_password_reset_token_by_raw(db, payload.token)
+    now = utc_now()
+
+    if reset_token is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="El enlace para cambiar la contraseña no es válido.",
+        )
+    if reset_token.used_at is not None:
+        raise HTTPException(
+            status_code=status.HTTP_410_GONE,
+            detail="Este enlace ya fue utilizado. Solicita uno nuevo a tu dojo.",
+        )
+    if reset_token.expires_at is not None and reset_token.expires_at <= now:
+        raise HTTPException(
+            status_code=status.HTTP_410_GONE,
+            detail="Este enlace ha expirado. Solicita uno nuevo a tu dojo.",
+        )
+
+    if reset_token.user_id is None or reset_token.student_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Este enlace no tiene una cuenta asociada.",
+        )
+
+    user = db.get(User, reset_token.user_id)
+    student = db.get(Student, reset_token.student_id)
+    if user is None or student is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="La cuenta asociada a este enlace ya no existe.",
+        )
+    if not user.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="El acceso al portal fue revocado por tu dojo.",
+        )
+
+    # Resolver email final (con el que fue enviado el link, o el del User, o ficha)
+    final_email: str | None = None
+    if reset_token.email_sent_to:
+        final_email = reset_token.email_sent_to
+    elif not _is_placeholder_email(user.email):
+        final_email = user.email
+    elif student.email and not _is_placeholder_email(student.email):
+        final_email = student.email
+
+    if final_email is None:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="No fue posible identificar el correo asociado a esta cuenta.",
+        )
+
+    # Prevenir colisión de email (si por alguna razón final_email != user.email)
+    if final_email.strip().lower() != user.email.strip().lower():
+        duplicate = db.scalar(
+            select(User).where(User.email == final_email, User.id != user.id)
+        )
+        if duplicate is not None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Ese correo ya está registrado en otra cuenta.",
+            )
+        user.email = final_email
+
+    # === Aplicar cambios ===
+    user.password_hash = hash_password(payload.new_password)
+    user.email_verified_at = now or user.email_verified_at
+    user.must_change_password = False
+    if user.first_name is None:
+        user.first_name = student.first_name
+    if user.last_name is None:
+        user.last_name = student.last_name
+
+    reset_token.used_at = now
+    _invalidate_password_reset_tokens(
+        db,
+        student_id=student.id,
+        user_id=user.id,
+        used_at=now,
+    )
+
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise build_duplicate_error(exc, "No fue posible cambiar tu contraseña") from exc
+
+    db.refresh(user)
+    return StudentPasswordResetConfirmResponse(
+        status="ok",
+        user_email=user.email,
+        message="Tu cuenta ha sido activada. Ya puedes iniciar sesión en ElDojo.",
+    )
 

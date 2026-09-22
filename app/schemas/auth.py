@@ -218,3 +218,45 @@ class StudentInvitationVerifyCodeResponse(BaseModel):
     status: str
     message: str
     challenge_token: str | None = None
+
+
+class StudentPasswordResetPreviewResponse(BaseModel):
+    """Estado público de un token de reseteo de contraseña de alumno."""
+
+    status: str = "valid"
+    message: str
+    first_name: str | None = None
+    last_name: str | None = None
+    photo_url: str | None = None
+    suggested_email: str | None = None
+    dojo_name: str | None = None
+    expires_at: datetime | None = None
+
+
+class StudentPasswordResetConfirmRequest(BaseModel):
+    """Payload público para cambiar la contraseña de un alumno via reset token."""
+
+    token: str = Field(min_length=16, max_length=512)
+    new_password: str = Field(min_length=8, max_length=128)
+    confirm_password: str = Field(min_length=8, max_length=128)
+    accept_terms: bool = Field(..., description="Aceptar términos de uso y privacidad")
+
+    @model_validator(mode="after")
+    def validate_password_match_and_terms(self) -> "StudentPasswordResetConfirmRequest":
+        if self.new_password != self.confirm_password:
+            raise ValueError("Las contraseñas no coinciden")
+        if not self.accept_terms:
+            raise ValueError("Debes aceptar los términos para continuar")
+        return self
+
+
+class StudentPasswordResetConfirmResponse(BaseModel):
+    """Respuesta al confirmar con éxito el cambio de contraseña.
+
+    Importante: NO contiene tokens de sesión (no auto-login). El alumno
+    debe iniciar sesión manualmente desde eldojo.tech.
+    """
+
+    status: str = "ok"
+    user_email: str
+    message: str

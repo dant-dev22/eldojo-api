@@ -186,6 +186,10 @@ def _populate_portal_access_status(
     - Las filas legacy (nonce=None) no son reconstruibles y requieren
       regeneración (el frontend detecta invitation_can_reconstruct=False
       y fuerza regeneración al primer click de copiar).
+
+    Nuevo (Flujo auto-aprobado): también inspecciona StudentPasswordResetToken
+    para detectar el estado `PASSWORD_PENDING` → alumno APROBADO pero con
+    contraseña autogenerada pendiente de ser cambiada.
     """
 
     status_obj = StudentPortalAccessStatus()
@@ -193,6 +197,7 @@ def _populate_portal_access_status(
     now = _utc_now()
     has_linked_active_user = False
     user_email_verified = False
+    user_must_change_password = False
     if student.user_id is not None:
         user = db.get(User, student.user_id)
         if user is not None:
@@ -200,6 +205,7 @@ def _populate_portal_access_status(
             status_obj.user_is_active = bool(user.is_active)
             user_email_verified = user.email_verified_at is not None
             status_obj.user_email_verified = user_email_verified
+            user_must_change_password = bool(getattr(user, "must_change_password", False))
             has_linked_active_user = bool(user.is_active) and user_email_verified
 
     latest_invitation = db.scalar(
@@ -208,11 +214,25 @@ def _populate_portal_access_status(
         .order_by(StudentInvitationToken.created_at.desc(), StudentInvitationToken.id.desc())
     )
 
+    latest_reset = db.scalar(
+        select(StudentPasswordResetToken)
+        .where(StudentPasswordResetToken.student_id == student.id)
+        .order_by(
+            StudentPasswordResetToken.created_at.desc(),
+            StudentPasswordResetToken.id.desc(),
+        )
+    )
+
     is_not_expired = False
     is_pending = False
     is_used = False
     is_expired_only = False
     reconstructed_raw: str | None = None
+
+    reset_is_pending = False
+    reset_is_expired_only = False
+    reset_is_used = False
+    reset_reconstructed_raw: str | None = None
 
     if latest_invitation is not None:
         is_not_expired = (
@@ -245,23 +265,69 @@ def _populate_portal_access_status(
             status_obj.verification_code_sent = False
             status_obj.verification_code_sent_to_email = None
 
+    # === Estado PASSWORD_PENDING (nuevo flujo auto-aprobado) ===
+    password_pending_state = False
+    if latest_reset is not None:
+        reset_not_expired = (
+            latest_reset.expires_at is None or latest_reset.expires_at > now
+        )
+        reset_is_used = latest_reset.used_at is not None
+        reset_is_pending = (not reset_is_used) and reset_not_expired
+        reset_is_expired_only = (not reset_is_used) and (not reset_not_expired)
+
+        if (
+            has_linked_active_user
+            and user_must_change_password
+            and (reset_is_pending or reset_is_expired_only)
+        ):
+            password_pending_state = True
+            reset_reconstructed_raw = reconstruct_student_invitation_token(
+                latest_reset
+            )
+            if reset_is_pending:
+                # Actualizar campos auxiliares como si fuera una invitación legacy
+                status_obj.pending_invitation_exists = True
+                status_obj.invitation_expires_at = latest_reset.expires_at
+                if latest_reset.email_sent_to:
+                    status_obj.invitation_email_sent_to = latest_reset.email_sent_to
+                status_obj.invitation_can_reconstruct = bool(reset_reconstructed_raw)
+                if status_obj.invitation_sent_count == 0:
+                    status_obj.invitation_sent_count = 1
+
     # === Calcular invitation_status ===
-    if has_linked_active_user:
+    if password_pending_state:
+        status_obj.invitation_status = StudentPortalInvitationStatus.PASSWORD_PENDING
+    elif has_linked_active_user and not user_must_change_password:
         status_obj.invitation_status = StudentPortalInvitationStatus.LINKED
     elif is_pending:
         status_obj.invitation_status = StudentPortalInvitationStatus.PENDING
-    elif latest_invitation is None:
+    elif reset_is_pending:
+        # Reset token pendiente + sin user aprobado (borde). Tratar como pending.
+        status_obj.invitation_status = StudentPortalInvitationStatus.PENDING
+        status_obj.invitation_expires_at = latest_reset.expires_at if latest_reset else None
+        status_obj.invitation_email_sent_to = latest_reset.email_sent_to if latest_reset else None
+        status_obj.invitation_can_reconstruct = bool(reset_reconstructed_raw)
+    elif latest_invitation is None and latest_reset is None:
         status_obj.invitation_status = StudentPortalInvitationStatus.NONE
     elif is_expired_only:
         status_obj.invitation_status = StudentPortalInvitationStatus.EXPIRED
+    elif reset_is_expired_only and not password_pending_state:
+        status_obj.invitation_status = StudentPortalInvitationStatus.EXPIRED
+        status_obj.invitation_expires_at = latest_reset.expires_at if latest_reset else None
+        status_obj.invitation_email_sent_to = latest_reset.email_sent_to if latest_reset else None
     elif is_used:
         status_obj.invitation_status = StudentPortalInvitationStatus.USED
+    elif reset_is_used and has_linked_active_user:
+        # Token usado y user con contraseña personalizada → LINKED
+        status_obj.invitation_status = StudentPortalInvitationStatus.LINKED
     else:
         status_obj.invitation_status = StudentPortalInvitationStatus.NONE
 
     # === Poblar invitation_link ===
     if latest_raw_token:
         status_obj.invitation_link = build_student_invitation_link(latest_raw_token)
+    elif reset_reconstructed_raw and (reset_is_pending or password_pending_state):
+        status_obj.invitation_link = build_student_invitation_link(reset_reconstructed_raw)
     elif reconstructed_raw and is_pending:
         status_obj.invitation_link = build_student_invitation_link(reconstructed_raw)
 
@@ -446,12 +512,15 @@ def create_student(
 ) -> Student:
     """Crea un alumno y genera su `unique_code` automáticamente.
 
-    Si `enable_portal_access=True` y no se proporcionó `user_id`:
-      - Crea un User STUDENT placeholder con credenciales temporales bloqueadas
-        para login normal (email_verified_at=None).
-      - Genera y persiste un token de invitación.
-      - Devuelve `portal_access.invitation_link` con el enlace público que
-        el admin debe compartir con el alumno.
+    NUEVO FLUJO (Ticket 5 - Auto-Aprobación):
+      Si `enable_portal_access=True` y no se proporcionó `user_id`:
+        - Crea un User STUDENT placeholder APROBADO:
+            * is_active=True
+            * email_verified_at=NOW()   (no necesita verificación de email)
+            * must_change_password=TRUE (solo pendiente: cambiar contraseña)
+        - Genera y persiste un token de reset de password.
+        - Devuelve `portal_access.invitation_link` con el enlace público
+          que el admin debe compartir con el alumno para cambiar su clave.
     """
 
     ensure_can_access_operational_scope(
@@ -477,6 +546,9 @@ def create_student(
     db.add(student)
 
     generated_raw_token: str | None = None
+    resolved_portal_email: str | None = None
+
+    admin_provided_password = (getattr(payload, "password", None) or "").strip() or None
 
     try:
         db.flush()
@@ -488,33 +560,69 @@ def create_student(
                 unique_code=unique_code,
                 student_email=payload.student_email,
             )
-            invitation_created_at = _utc_now()
-            invitation_nonce = generate_student_invitation_nonce()
-            raw_token, token_hash, token_tail = generate_deterministic_student_invitation_token(
-                student_id=student.id,
-                nonce=invitation_nonce,
-                created_at=invitation_created_at,
-            )
-            db.add(
-                StudentInvitationToken(
+
+            # === NUEVO: Marcar como APROBADO automáticamente ===
+            now = _utc_now()
+            if not portal_user.is_active:
+                portal_user.is_active = True
+            portal_user.email_verified_at = now or portal_user.email_verified_at
+            portal_user.first_time = True
+
+            # Si el admin proporcionó password, usarlo y no requerir cambio
+            if admin_provided_password:
+                portal_user.password_hash = hash_password(admin_provided_password)
+                portal_user.must_change_password = False
+            else:
+                portal_user.must_change_password = True
+
+            # Resolver email real. Si NO hay, se queda placeholder pero
+            # NO se envía correo (fail-open: el link se guarda igual).
+            student_email_val = (payload.student_email or "").strip() or None
+            ficha_email_val = (getattr(student, "email", None) or "").strip() or None
+            if student_email_val and not _is_placeholder_email(student_email_val):
+                resolved_portal_email = student_email_val.lower()
+            elif ficha_email_val and not _is_placeholder_email(ficha_email_val):
+                resolved_portal_email = ficha_email_val.lower()
+
+            if resolved_portal_email and _is_placeholder_email(portal_user.email):
+                # Colisión de email? Si otro user ya tiene resolved_portal_email → 409
+                from app.api.routes.auth import get_user_by_email
+
+                collision_user = get_user_by_email(db, resolved_portal_email)
+                if collision_user is not None and int(collision_user.id) != int(portal_user.id):
+                    raise HTTPException(
+                        status_code=status.HTTP_409_CONFLICT,
+                        detail=f"El correo {resolved_portal_email} ya está en uso por otra cuenta.",
+                    )
+                portal_user.email = resolved_portal_email
+
+            # Solo generar token de reset si NO hubo password explícito
+            if not admin_provided_password:
+                reset_created_at = now
+                reset_nonce = generate_student_invitation_nonce()
+                raw_token, token_hash, _token_tail = generate_deterministic_student_invitation_token(
                     student_id=student.id,
-                    user_id=portal_user.id,
-                    token_hash=token_hash,
-                    token_plain_tail=token_tail,
-                    token_nonce=invitation_nonce,
-                    expires_at=student_invitation_expires_at(),
-                    used_at=None,
-                    sent_count=1,
-                    created_by_admin_id=current_user.id,
-                    email_sent_to=payload.student_email,
-                    created_at=invitation_created_at,
+                    nonce=reset_nonce,
+                    created_at=reset_created_at,
                 )
-            )
-            generated_raw_token = raw_token
+                db.add(
+                    StudentPasswordResetToken(
+                        student_id=student.id,
+                        user_id=portal_user.id,
+                        token_hash=token_hash,
+                        token_nonce=reset_nonce,
+                        expires_at=student_invitation_expires_at(),
+                        used_at=None,
+                        created_by_admin_id=current_user.id,
+                        email_sent_to=resolved_portal_email,
+                        created_at=reset_created_at,
+                    )
+                )
+                generated_raw_token = raw_token
 
         db.commit()
 
-        if should_enable_portal and generated_raw_token and payload.student_email:
+        if should_enable_portal and generated_raw_token and resolved_portal_email:
             organization = db.get(Organization, payload.organization_id)
             dojo_name = getattr(organization, "name", None) if organization else None
             recipient_name = (
@@ -527,21 +635,24 @@ def create_student(
             if ttl_hours <= 0:
                 ttl_hours = 48
             mail_ok = send_student_invitation_link_email(
-                recipient_email=payload.student_email,
+                recipient_email=resolved_portal_email,
                 recipient_name=recipient_name,
                 dojo_name=dojo_name,
                 invitation_link=invitation_link,
                 expires_hours=ttl_hours,
             )
             if mail_ok:
-                latest_inv = db.scalar(
-                    select(StudentInvitationToken)
-                    .where(StudentInvitationToken.student_id == student.id)
-                    .order_by(StudentInvitationToken.created_at.desc(), StudentInvitationToken.id.desc())
+                latest_reset = db.scalar(
+                    select(StudentPasswordResetToken)
+                    .where(StudentPasswordResetToken.student_id == student.id)
+                    .order_by(
+                        StudentPasswordResetToken.created_at.desc(),
+                        StudentPasswordResetToken.id.desc(),
+                    )
                     .limit(1)
                 )
-                if latest_inv is not None and latest_inv.email_sent_to != payload.student_email:
-                    latest_inv.email_sent_to = payload.student_email
+                if latest_reset is not None and latest_reset.email_sent_to != resolved_portal_email:
+                    latest_reset.email_sent_to = resolved_portal_email
                     db.commit()
     except IntegrityError as exc:
         db.rollback()
@@ -730,7 +841,11 @@ def update_student(
     """Actualiza de forma parcial un alumno existente."""
 
     student = get_student_or_404(db, student_id)
-    changes = payload.model_dump(exclude_unset=True)
+    raw_changes = payload.model_dump(exclude_unset=True)
+    incoming_password = raw_changes.pop("password", None)
+    if isinstance(incoming_password, str):
+        incoming_password = incoming_password.strip() or None
+    changes = raw_changes
 
     organization_id = changes.get("organization_id", student.organization_id)
     branch_id = changes.get("branch_id", student.branch_id)
@@ -757,6 +872,15 @@ def update_student(
 
     for field_name, value in changes.items():
         setattr(student, field_name, value)
+
+    # Actualizar contraseña en el usuario portal si se proporcionó
+    if incoming_password:
+        effective_user_id = user_id or student.user_id
+        if effective_user_id:
+            portal_user = db.get(User, effective_user_id)
+            if portal_user is not None and portal_user.role == UserRole.STUDENT:
+                portal_user.password_hash = hash_password(incoming_password)
+                portal_user.must_change_password = False
 
     try:
         db.commit()

@@ -204,3 +204,122 @@ def send_student_invitation_link_email(
         return True
     except (OSError, smtplib.SMTPException):
         return False
+
+
+def send_student_account_activated_email(
+    *,
+    recipient_email: str,
+    recipient_name: str | None,
+    dojo_name: str | None,
+) -> bool:
+    """Envía el correo de confirmación cuando un alumno activa exitosamente su cuenta.
+
+    Fail-open: devuelve True si se entregó, False si no (SMTP no configurado,
+    error de red, timeout, etc.). El caller debe interpretar False y
+    continuar sin bloquear el flujo (fail-open).
+    """
+
+    if not recipient_email:
+        return False
+
+    try:
+        smtp_host, smtp_port, smtp_username, smtp_password, from_email = _require_mail_settings()
+    except MailDeliveryError:
+        return False
+
+    greeting_name = recipient_name.strip() if recipient_name and recipient_name.strip() else "alumno"
+    dojo_label = dojo_name.strip() if dojo_name and dojo_name.strip() else "tu dojo"
+
+    message = EmailMessage()
+    message["From"] = (
+        f"{settings.smtp_from_name} <{from_email}>"
+        if settings.smtp_from_name
+        else from_email
+    )
+    message["To"] = recipient_email
+    message["Subject"] = f"Felicidades, tu cuenta de ElDojo ha sido activada - {dojo_label.capitalize()}"
+    message.set_content(
+        "\n".join(
+            [
+                f"Hola {greeting_name},",
+                "",
+                "¡Felicidades! Tu cuenta del portal del alumno ha sido activada con éxito.",
+                "",
+                f"Ahora puedes iniciar sesión en ElDojo con el correo {recipient_email} y la contraseña que acabas de establecer.",
+                "",
+                f"Si tienes alguna duda, contacta a {dojo_label} para recibir apoyo.",
+                "",
+                "¡Bienvenido/a a ElDojo!",
+            ]
+        )
+    )
+
+    try:
+        with smtplib.SMTP_SSL(smtp_host, smtp_port) as smtp:
+            smtp.login(smtp_username, smtp_password)
+            smtp.send_message(message)
+        return True
+    except (OSError, smtplib.SMTPException):
+        return False
+
+
+def send_admin_student_account_activated_notification(
+    *,
+    recipient_email: str,
+    dojo_name: str | None,
+    student_email: str,
+    student_name: str | None,
+) -> bool:
+    """Notifica al administrador que un alumno activó exitosamente su cuenta.
+
+    Fail-open: devuelve True si se entregó, False si no.
+    """
+
+    if not recipient_email or not student_email:
+        return False
+
+    try:
+        smtp_host, smtp_port, smtp_username, smtp_password, from_email = _require_mail_settings()
+    except MailDeliveryError:
+        return False
+
+    dojo_label = dojo_name.strip() if dojo_name and dojo_name.strip() else "tu dojo"
+    student_label = (
+        student_name.strip()
+        if student_name and student_name.strip()
+        else "el alumno"
+    )
+
+    message = EmailMessage()
+    message["From"] = (
+        f"{settings.smtp_from_name} <{from_email}>"
+        if settings.smtp_from_name
+        else from_email
+    )
+    message["To"] = recipient_email
+    message["Subject"] = f"Cuenta de alumno activada - {dojo_label.capitalize()}"
+    message.set_content(
+        "\n".join(
+            [
+                f"Hola administrador/a de {dojo_label.capitalize()},",
+                "",
+                "Te informamos que la siguiente cuenta de alumno ha sido activada con éxito:",
+                "",
+                f"  Alumno:   {student_label}",
+                f"  Correo:   {student_email}",
+                "",
+                "El alumno ya puede iniciar sesión en el portal con sus nuevas credenciales.",
+                "",
+                "Saludos,",
+                "ElDojo",
+            ]
+        )
+    )
+
+    try:
+        with smtplib.SMTP_SSL(smtp_host, smtp_port) as smtp:
+            smtp.login(smtp_username, smtp_password)
+            smtp.send_message(message)
+        return True
+    except (OSError, smtplib.SMTPException):
+        return False

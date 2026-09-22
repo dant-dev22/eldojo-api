@@ -19,19 +19,23 @@ from app.schemas.student_document import StudentDocumentRead
 class StudentPortalInvitationStatus(str, Enum):
     """Estado semántico de la invitación del portal (admin-facing).
 
-    none     -> Nunca se generó una invitación para este alumno.
-    pending  -> Hay una invitación vigente (no vencida, no usada).
-    expired  -> Última invitación existe pero ya venció (no usada).
-    used     -> Última invitación fue canjeada pero el usuario aún no
-                se vinculó (borde; en general 'linked' cubre este caso).
-    linked   -> El alumno ya tiene un usuario portal activo y verificado;
-                no existe invitación pendiente relevante.
+    none             -> Nunca se generó un link para este alumno.
+    pending          -> Hay una invitación legacy vigente (no vencida, no usada).
+    expired          -> Última invitación existe pero ya venció (no usada).
+    used             -> Última invitación fue canjeada pero el usuario aún no
+                        se vinculó (borde; en general 'linked' cubre este caso).
+    password_pending -> El alumno está APROBADO en el portal (User existe,
+                        email verificado) pero debe cambiar su contraseña
+                        autogenerada por primera vez.
+    linked           -> El alumno ya tiene un usuario portal activo y con
+                        contraseña personalizada; no hay links pendientes.
     """
 
     NONE = "none"
     PENDING = "pending"
     EXPIRED = "expired"
     USED = "used"
+    PASSWORD_PENDING = "password_pending"
     LINKED = "linked"
 
 
@@ -113,10 +117,14 @@ class StudentCreate(StudentBase):
     (crea un usuario placeholder y genera un link de invitación).
     El email de acceso `student_email` es optativo y se usa solo para
     auditoría / envío manual del link.
+
+    Si se proporciona `password`, se usa directamente y no se marca
+    `must_change_password`, evitando el flujo de link de reseteo.
     """
 
     enable_portal_access: bool = True
     student_email: str | None = Field(default=None, max_length=255)
+    password: str | None = Field(default=None, min_length=8, max_length=128)
 
     @field_validator("student_email")
     @classmethod
@@ -151,6 +159,7 @@ class StudentUpdate(BaseModel):
     guardian_phone: str | None = Field(default=None, max_length=50)
     phone: str | None = Field(default=None, max_length=50)
     email: str | None = Field(default=None, max_length=255)
+    password: str | None = Field(default=None, min_length=8, max_length=128)
     is_minor: bool | None = None
     notes: str | None = None
     rd_victorias: int | None = Field(default=None, ge=0)
