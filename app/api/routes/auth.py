@@ -6,7 +6,8 @@ from datetime import datetime, timedelta, timezone
 import re
 import unicodedata
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, status
+from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
@@ -49,6 +50,7 @@ from app.models.enums import UserRole
 from app.models.student import Student
 from app.models.student_invitation import StudentInvitationToken
 from app.models.student_password_reset import StudentPasswordResetToken
+from app.models.session_sync_ticket import SessionSyncTicket
 from app.models.user import AdminAssignment, User
 from app.schemas.auth import (
     AcademyConfirmRequest,
@@ -765,15 +767,149 @@ def update_tutorial_state(
 
 
 def _prune_expired_session_tickets(db: Session) -> None:
-    """Deprecated (ya no se usa SessionSyncTicket). Stub sin-op para mantener BC."""
+    """Elimina tickets de sincronización caducados para mantener la tabla pequeña."""
+
+    now = utc_now()
+    db.query(SessionSyncTicket).where(SessionSyncTicket.expires_at < now).delete(synchronize_session=False)
+    db.commit()
     return None
 
 
-# ======================== DEPRECATED - Cross-domain sync eliminado ========================
-# Los endpoints /auth/session-ticket/create y /auth/session-ticket/redeem se eliminan
-# en favor de flujo tradicional: login en eldojo.tech + redirect directo a app./mi.
-# La tabla `session_sync_ticket` permanece por 30 días para logs, luego se puede borrar.
-# ========================================================================================
+def _create_session_sync_ticket(db: Session, user: User) -> tuple[str, int]:
+    """Genera un ticket de sincronización de un solo uso y lo guarda hasheado.
+
+    Devuelve (ticket_raw, ttl_seconds). El ticket_raw es lo que se envía al
+    cliente; solo se guarda el hash en BD.
+    """
+
+    from app.core.security import hash_email_verification_token, generate_email_verification_token
+
+    ttl_seconds = max(15, int(getattr(settings, "session_ticket_ttl_seconds", 30)))
+    raw_ticket = generate_email_verification_token()
+    ticket_hash = hash_email_verification_token(raw_ticket)
+    now = utc_now()
+
+    # Invalida tickets anteriores para el mismo usuario (un solo ticket vivo por usuario)
+    db.query(SessionSyncTicket).where(
+        SessionSyncTicket.user_id == user.id,
+        SessionSyncTicket.used_at.is_(None),
+    ).update(
+        {SessionSyncTicket.used_at: now},
+        synchronize_session=False,
+    )
+
+    # Insertar nuevo ticket
+    db.add(
+        SessionSyncTicket(
+            user_id=user.id,
+            ticket_hash=ticket_hash,
+            expires_at=now + timedelta(seconds=ttl_seconds),
+            used_at=None,
+        )
+    )
+    db.commit()
+
+    # Limpiar tickets vencidos
+    try:
+        _prune_expired_session_tickets(db)
+    except Exception:
+        # El pruning no debe bloquear el flujo principal
+        db.rollback()
+
+    return raw_ticket, ttl_seconds
+
+
+def _redeem_session_sync_ticket(db: Session, raw_ticket: str) -> User | None:
+    """Valida y consume un ticket de sincronización. Devuelve el usuario o None si inválido."""
+
+    from app.core.security import hash_email_verification_token
+
+    if not raw_ticket:
+        return None
+
+    ticket_hash = hash_email_verification_token(raw_ticket)
+    now = utc_now()
+
+    ticket = db.scalar(
+        select(SessionSyncTicket)
+        .where(SessionSyncTicket.ticket_hash == ticket_hash)
+        .where(SessionSyncTicket.used_at.is_(None))
+        .order_by(SessionSyncTicket.id.desc())
+        .limit(1)
+    )
+
+    if ticket is None:
+        return None
+    if ticket.expires_at <= now:
+        return None
+
+    user = db.get(User, ticket.user_id)
+    if user is None or not user.is_active:
+        return None
+
+    # Marcar como usado
+    ticket.used_at = now
+    user.last_login_at = now
+    db.commit()
+    db.refresh(user)
+    return user
+
+
+# ======================== Cross-domain Session Sync ========================
+
+
+class SessionSyncTicketCreateResponse(BaseModel):
+    ticket: str = Field(..., min_length=16, description="Token raw de un solo uso para cruzar dominios.")
+    ttl_seconds: int = Field(..., ge=15, le=300, description="Vida útil del ticket en segundos.")
+
+
+class SessionSyncTicketRedeemRequest(BaseModel):
+    ticket: str = Field(..., min_length=16, max_length=512)
+
+
+@router.post("/session-ticket/create", response_model=SessionSyncTicketCreateResponse)
+def create_session_sync_ticket(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_active_user),
+) -> SessionSyncTicketCreateResponse:
+    """Genera un ticket de un solo uso para transferir la sesión entre subdominios.
+
+    Requiere autenticación Bearer válida. Vida típica: 15-30 segundos.
+    El ticket se envía como query param `ticket` al destino y se canjea
+    contra `/auth/session-ticket/redeem` para obtener tokens nuevos en ese origen.
+    """
+
+    raw_ticket, ttl = _create_session_sync_ticket(db, current_user)
+    return SessionSyncTicketCreateResponse(ticket=raw_ticket, ttl_seconds=ttl)
+
+
+@router.post("/session-ticket/redeem", response_model=TokenResponse)
+def redeem_session_sync_ticket(
+    payload: SessionSyncTicketRedeemRequest = Body(...),
+    db: Session = Depends(get_db),
+) -> TokenResponse:
+    """Canjea un ticket de sincronización válido por un nuevo par de tokens.
+
+    Endpoint público: no requiere Bearer. Si el ticket es válido y no caducado,
+    marca el ticket como usado y devuelve TokenResponse completo para almacenar
+    en el localStorage del subdominio destino.
+    """
+
+    ticket_value = (payload.ticket or "").strip()
+    if not ticket_value:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Ticket de sesión requerido.",
+        )
+
+    user = _redeem_session_sync_ticket(db, ticket_value)
+    if user is None:
+        raise HTTPException(
+            status_code=status.HTTP_410_GONE,
+            detail="El ticket de sesión ya expiró, fue consumido o no es válido.",
+        )
+
+    return build_token_response(user)
 
 
 # ======================== Student Invitation (público) ========================
