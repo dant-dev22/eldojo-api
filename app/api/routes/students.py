@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 import secrets
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
+from pydantic import BaseModel, Field
 from sqlalchemy import and_, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
-from app.api.dependencies import require_active_user
+from app.api.dependencies import require_active_user, require_student_user
+from app.models.enums import AttendanceMethod
 from app.core.authorization import ensure_can_access_operational_scope, scope_branch_filter
 from app.core.security import hash_password
 from app.core.student_codes import build_student_unique_code
@@ -34,9 +36,9 @@ from app.models.organization import Branch, Organization
 from app.models.student import Student
 from app.models.student_invitation import StudentInvitationToken
 from app.models.student_password_reset import StudentPasswordResetToken
-from app.models.teaching import MartialClass
+from app.models.teaching import Attendance, MartialClass
 from app.models.user import User
-from app.schemas.attendance import StudentAttendanceSummary
+from app.schemas.attendance import AttendanceRead, StudentAttendanceSummary
 from app.schemas.common import MessageResponse
 from app.schemas.student import (
     StudentCreate,
@@ -1478,3 +1480,108 @@ def create_student_authorized_person(
     db.commit()
     db.refresh(obj)
     return AuthorizedPersonRead.model_validate(obj)
+
+
+# ======================== Self-Attendance (alumno autenticado) ========================
+
+
+class StudentSelfAttendanceCreate(BaseModel):
+    """Payload que envía la app del alumno para autoregistrar su asistencia."""
+
+    class_id: int = Field(gt=0)
+    branch_id: int | None = Field(default=None, gt=0)
+
+
+@router.post("/me/attendance/register", response_model=AttendanceRead, status_code=status.HTTP_201_CREATED)
+def register_my_own_attendance(
+    payload: StudentSelfAttendanceCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_student_user),
+    x_attendance_source: str | None = Header(default=None, alias="X-Attendance-Source"),
+) -> Attendance:
+    """Registra la asistencia del propio alumno autenticado.
+
+    - El `student_id` NUNCA viene del cliente: se hardcodea al alumno del token
+      (seguridad crítica para evitar que un alumno registre asistencias a nombre de otro).
+    - El QR que envía la tablet contiene `class_id` (y opcionalmente `branch_id`).
+    - Se envía `X-Attendance-Source: qr` para marcar el método como QR (por defecto MANUAL).
+    - Previene doble check-in dentro de una ventana de 8 horas respondiendo 200 OK
+      con el registro existente sin crear duplicados.
+    """
+
+    student = db.scalar(
+        select(Student)
+        .where(Student.user_id == current_user.id)
+        .where(Student.deleted_at.is_(None))
+        .options(selectinload(Student.current_belt_level), selectinload(Student.current_stripe))
+    )
+    if student is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No existe un perfil de alumno vinculado a tu usuario.",
+        )
+    if student.status != StudentStatus.ACTIVE:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Tu perfil de alumno no está activo.",
+        )
+
+    effective_branch_id = payload.branch_id or student.branch_id
+    if effective_branch_id != student.branch_id:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="La sucursal seleccionada no coincide con tu sucursal asignada.",
+        )
+
+    class_obj = db.get(MartialClass, payload.class_id)
+    if class_obj is None or not class_obj.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="La clase seleccionada no existe o no está activa.",
+        )
+    if class_obj.organization_id != student.organization_id or class_obj.branch_id != effective_branch_id:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="La clase seleccionada no pertenece a esta sucursal.",
+        )
+
+    normalized_source = (x_attendance_source or "").strip().lower()
+    resolved_method = AttendanceMethod.QR if normalized_source == "qr" else AttendanceMethod.MANUAL
+
+    now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
+    duplicate_window_start = now_utc - timedelta(hours=8)
+
+    duplicate = db.scalar(
+        select(Attendance)
+        .options(selectinload(Attendance.class_obj), selectinload(Attendance.student))
+        .where(
+            and_(
+                Attendance.student_id == student.id,
+                Attendance.branch_id == effective_branch_id,
+                Attendance.class_id == payload.class_id,
+                Attendance.check_in_at >= duplicate_window_start,
+                Attendance.check_in_at <= now_utc,
+            )
+        )
+    )
+    if duplicate is not None:
+        return duplicate
+
+    attendance = Attendance(
+        student_id=student.id,
+        class_id=payload.class_id,
+        branch_id=effective_branch_id,
+        check_in_at=now_utc,
+        method=resolved_method,
+        registered_by=None,
+    )
+    db.add(attendance)
+    db.commit()
+    db.refresh(attendance)
+
+    refreshed = db.scalar(
+        select(Attendance)
+        .options(selectinload(Attendance.class_obj), selectinload(Attendance.student))
+        .where(Attendance.id == attendance.id)
+    )
+    return refreshed or attendance
